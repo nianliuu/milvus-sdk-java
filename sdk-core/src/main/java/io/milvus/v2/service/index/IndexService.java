@@ -23,6 +23,7 @@ import com.google.gson.JsonObject;
 import io.milvus.grpc.*;
 import io.milvus.param.Constant;
 import io.milvus.param.ParamUtils;
+import io.milvus.v2.common.IndexBuildState;
 import io.milvus.v2.common.IndexParam;
 import io.milvus.v2.exception.ErrorCode;
 import io.milvus.v2.exception.MilvusClientException;
@@ -51,6 +52,11 @@ public class IndexService extends BaseService {
                             .setKey(Constant.INDEX_TYPE)
                             .setValue(indexParam.getIndexType().getName())
                             .build());
+
+            if (StringUtils.isNotEmpty(request.getDatabaseName())) {
+                builder.setDbName(request.getDatabaseName());
+            }
+
             if(indexParam.getMetricType()!= null){
                 // only vector field has a metric type
                 builder.addExtraParams(KeyValuePair.newBuilder()
@@ -60,19 +66,20 @@ public class IndexService extends BaseService {
             }
             Map<String, Object> extraParams = indexParam.getExtraParams();
             if (extraParams != null && !extraParams.isEmpty()) {
-                JsonObject params = new JsonObject();
                 for (String key : extraParams.keySet()) {
-                    params.addProperty(key, extraParams.get(key).toString());
+                    builder.addExtraParams(KeyValuePair.newBuilder()
+                            .setKey(key)
+                            .setValue(extraParams.get(key).toString())
+                            .build());
                 }
-                // the extra params is a JSON format string like "{\"M\": 8, \"efConstruction\": 64}"
-                builder.addExtraParams(KeyValuePair.newBuilder()
-                        .setKey(Constant.PARAMS)
-                        .setValue(params.toString())
-                        .build());
             }
 
             Status status = blockingStub.createIndex(builder.build());
             rpcUtils.handleResponse(title, status);
+            if (request.getSync()) {
+                WaitForIndexComplete(blockingStub, request.getDatabaseName(), request.getCollectionName(), indexParam.getFieldName(),
+                        indexParam.getIndexName(), request.getTimeout());
+            }
         }
 
         return null;
@@ -133,15 +140,17 @@ public class IndexService extends BaseService {
     }
 
     public DescribeIndexResp describeIndex(MilvusServiceGrpc.MilvusServiceBlockingStub blockingStub, DescribeIndexReq request) {
-        String title = String.format("DescribeIndexRequest collectionName:%s, fieldName:%s, indexName:%s",
-                request.getCollectionName(), request.getFieldName(), request.getIndexName());
-        DescribeIndexRequest describeIndexRequest = DescribeIndexRequest.newBuilder()
+        String title = String.format("DescribeIndexRequest databaseName:%s collectionName:%s, fieldName:%s, indexName:%s",
+               request.getDatabaseName(), request.getCollectionName(), request.getFieldName(), request.getIndexName());
+        DescribeIndexRequest.Builder builder = DescribeIndexRequest.newBuilder()
                 .setCollectionName(request.getCollectionName())
                 .setFieldName(request.getFieldName() == null ? "" : request.getFieldName())
-                .setIndexName(request.getIndexName() == null ? "" : request.getIndexName())
-                .build();
+                .setIndexName(request.getIndexName() == null ? "" : request.getIndexName());
+        if (StringUtils.isNotEmpty(request.getDatabaseName())) {
+            builder.setDbName(request.getDatabaseName());
+        }
 
-        DescribeIndexResponse response = blockingStub.describeIndex(describeIndexRequest);
+        DescribeIndexResponse response = blockingStub.describeIndex(builder.build());
         rpcUtils.handleResponse(title, response.getStatus());
         List<IndexDescription> indexs = response.getIndexDescriptionsList().stream().filter(index -> index.getIndexName().equals(request.getIndexName()) || index.getFieldName().equals(request.getFieldName())).collect(Collectors.toList());
         if (indexs.isEmpty()) {
@@ -174,5 +183,66 @@ public class IndexService extends BaseService {
             indexNames.add(index.getIndexName());
         });
         return indexNames;
+    }
+
+    private void WaitForIndexComplete(MilvusServiceGrpc.MilvusServiceBlockingStub blockingStub,
+                                     String databaseName, String collectionName, String fieldName, String indexName, long timeoutMs) {
+        long startTime = System.currentTimeMillis(); // Capture start time/ Timeout in milliseconds (60 seconds)
+
+        // alloc a timestamp from the server, the DescribeIndex() will use this timestamp to check the segments
+        // which are generated before this timestamp.
+        AllocTimestampResponse allocTsResp = blockingStub.allocTimestamp(AllocTimestampRequest.newBuilder().build());
+        rpcUtils.handleResponse("AllocTimestampRequest", allocTsResp.getStatus());
+        long serverTs = allocTsResp.getTimestamp();
+
+        while (true) {
+            DescribeIndexReq describeIndexReq = DescribeIndexReq.builder()
+                    .collectionName(collectionName)
+                    .fieldName(fieldName)
+                    .indexName(indexName)
+                    .timestamp(serverTs)
+                    .build();
+            if (StringUtils.isNotEmpty(databaseName)) {
+                describeIndexReq.setDatabaseName(databaseName);
+            }
+            DescribeIndexResp response = describeIndex(blockingStub, describeIndexReq);
+            List<DescribeIndexResp.IndexDesc> indices = response.getIndexDescriptions();
+            DescribeIndexResp.IndexDesc desc = null;
+            if (indices.size() == 1) {
+                desc = indices.get(0);
+            } else {
+                for (DescribeIndexResp.IndexDesc index : indices) {
+                    if (fieldName.equals(index.getFieldName())) {
+                        desc = index;
+                        break;
+                    }
+                }
+            }
+
+            if (desc == null) {
+                String msg = String.format("Failed to describe the index '%s' of field '%s' from serv side", fieldName, indexName);
+                throw new MilvusClientException(ErrorCode.SERVER_ERROR, msg);
+            }
+
+            if (desc.getIndexState() == IndexBuildState.Finished) {
+                return;
+            } else if (desc.getIndexState() == IndexBuildState.Failed) {
+                String msg = "Index is failed, reason: " + desc.getIndexFailedReason();
+                throw new MilvusClientException(ErrorCode.SERVER_ERROR, msg);
+            }
+
+            // Check if timeout is exceeded
+            if (System.currentTimeMillis() - startTime > timeoutMs) {
+                throw new MilvusClientException(ErrorCode.SERVER_ERROR, "Create index timeout");
+            }
+            // Wait for a certain period before checking again
+            try {
+                Thread.sleep(500); // Sleep for 0.5 second. Adjust this value as needed.
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                System.out.println("Thread was interrupted, failed to complete operation");
+                return; // or handle interruption appropriately
+            }
+        }
     }
 }

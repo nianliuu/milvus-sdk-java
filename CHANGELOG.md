@@ -1,6 +1,39 @@
 # Changelog
 
-## milvus-sdk-java 2.5.4 (2025-1-09)
+## milvus-sdk-java 2.5.8 (2025-04-25)
+### Feature
+- Support getPersistentSegmentInfo/getQuerySegmentInfo interfaces for V2
+- Support transferNode interface for V2
+- Support checkHealth interface for V2
+
+## milvus-sdk-java 2.5.7 (2025-04-09)
+### Bug
+- Fix a compatible bug with milvus v2.5.8 that QueryResp.QueryResult doesn't return primary key
+- Fix a bug of nullable Array field that null value should be returned instead of an empty list
+
+### Improvement
+- Add proxy setting for connection to milvus
+- Support offset parameter for hybridSearch() interface
+- Add options parameter for bulkImport() interface
+
+## milvus-sdk-java 2.5.6 (2025-03-20)
+### Improvement
+- Optimize MilvusClientV2 search/query to support databaseName
+- Add SearchIteratorV2 to get better performance and recall compare to old SearchIterator
+- Add sync parameter for loadCollection/loadPartitions/createIndex
+
+## milvus-sdk-java 2.5.5 (2025-03-07)
+### Feature
+- Support HNSW_PQ/HNSW_SQ/HNSW_PRQ
+- Support describeReplicas() interface
+- BulkWriter supports nullable/default_value
+
+### Improvement
+- Add shardsNum for describeCollection
+- LoadPartitions support replicas
+- Optimize BulkWriter to reduce memory usage
+
+## milvus-sdk-java 2.5.4 (2025-01-09)
 ### Improvement
 - HybridSearch supports full text search
 
@@ -42,6 +75,18 @@
 - QueryIterator/SearchIterator supports mvcc
 - ClientPool throws exception if fail to create/get clients
 
+## milvus-sdk-java 2.4.11 (2025-04-09)
+### Bug
+- Fix a bug that consistency level is missed for createCollection()
+- Return shards_num for describeCollection()
+
+## milvus-sdk-java 2.4.10 (2024-12-31)
+### Feature
+- Support alterCollectionField interface for V2
+- Support refreshLoad/getPartitionStats interfaces for V2
+- Support dropIndexProperties/dropDatabaseProperties/dropCollectionProperties for V2
+- Support resource group interfaces for V2
+- 
 ## milvus-sdk-java 2.4.9 (2024-11-26)
 
 ### Feature

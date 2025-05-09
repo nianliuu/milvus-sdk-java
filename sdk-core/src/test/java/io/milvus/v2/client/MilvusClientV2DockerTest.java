@@ -30,6 +30,7 @@ import io.milvus.common.utils.Float16Utils;
 import io.milvus.common.utils.JsonUtils;
 import io.milvus.orm.iterator.QueryIterator;
 import io.milvus.orm.iterator.SearchIterator;
+import io.milvus.orm.iterator.SearchIteratorV2;
 import io.milvus.param.Constant;
 import io.milvus.pool.MilvusClientV2Pool;
 import io.milvus.pool.PoolConfig;
@@ -69,6 +70,7 @@ import org.testcontainers.milvus.MilvusContainer;
 
 import java.nio.ByteBuffer;
 import java.util.*;
+import java.util.function.Function;
 
 @Testcontainers(disabledWithoutDocker = true)
 class MilvusClientV2DockerTest {
@@ -79,7 +81,7 @@ class MilvusClientV2DockerTest {
     private static final TestUtils utils = new TestUtils(DIMENSION);
 
     @Container
-    private static final MilvusContainer milvus = new MilvusContainer("milvusdb/milvus:v2.5.2");
+    private static final MilvusContainer milvus = new MilvusContainer("milvusdb/milvus:v2.5.8");
 
     @BeforeAll
     public static void setUp() {
@@ -288,6 +290,9 @@ class MilvusClientV2DockerTest {
 
     @Test
     void testFloatVectors() {
+        CheckHealthResp healthy = client.checkHealth();
+        Assertions.assertTrue(healthy.getIsHealthy());
+
         String randomCollectionName = generator.generate(10);
 
         String vectorFieldName = "float_vector";
@@ -298,21 +303,10 @@ class MilvusClientV2DockerTest {
                 .dimension(DIMENSION)
                 .build());
 
-        Map<String,Object> extraParams = new HashMap<>();
-        extraParams.put("M",16);
-        extraParams.put("efConstruction",64);
-        IndexParam indexParam = IndexParam.builder()
-                .fieldName(vectorFieldName)
-                .indexType(IndexParam.IndexType.HNSW)
-                .metricType(IndexParam.MetricType.COSINE)
-                .extraParams(extraParams)
-                .build();
-
         CreateCollectionReq requestCreate = CreateCollectionReq.builder()
                 .collectionName(randomCollectionName)
                 .description("dummy")
                 .collectionSchema(collectionSchema)
-                .indexParams(Collections.singletonList(indexParam))
                 .build();
         client.createCollection(requestCreate);
 
@@ -330,12 +324,64 @@ class MilvusClientV2DockerTest {
                 .collectionNames(Collections.singletonList(randomCollectionName))
                 .build());
 
+        // get persistent segment info
+        GetPersistentSegmentInfoResp pSegInfo = client.getPersistentSegmentInfo(GetPersistentSegmentInfoReq.builder()
+                .collectionName(randomCollectionName)
+                .build());
+        Assertions.assertEquals(1, pSegInfo.getSegmentInfos().size());
+        GetPersistentSegmentInfoResp.PersistentSegmentInfo pInfo = pSegInfo.getSegmentInfos().get(0);
+        Assertions.assertTrue(pInfo.getSegmentID() > 0L);
+        Assertions.assertTrue(pInfo.getCollectionID() > 0L);
+        Assertions.assertTrue(pInfo.getPartitionID() > 0L);
+        Assertions.assertEquals(count, pInfo.getNumOfRows());
+        Assertions.assertEquals("Flushed", pInfo.getState());
+        Assertions.assertEquals("L1", pInfo.getLevel());
+        Assertions.assertFalse(pInfo.getIsSorted());
+
         // compact
         CompactResp compactResp = client.compact(CompactReq.builder()
                 .collectionName(randomCollectionName)
                 .build());
         // there is a segment is flushed by the flush() interface, there could be a compaction task created
         Assertions.assertTrue(compactResp.getCompactionID() == -1L || compactResp.getCompactionID() > 0L);
+
+        // create index
+        Map<String,Object> extraParams = new HashMap<>();
+        extraParams.put("M", 64);
+        extraParams.put("efConstruction", 200);
+        IndexParam indexParam = IndexParam.builder()
+                .fieldName(vectorFieldName)
+                .indexType(IndexParam.IndexType.HNSW)
+                .metricType(IndexParam.MetricType.COSINE)
+                .extraParams(extraParams)
+                .build();
+        client.createIndex(CreateIndexReq.builder()
+                .collectionName(randomCollectionName)
+                .indexParams(Collections.singletonList(indexParam))
+                .build());
+
+        client.loadCollection(LoadCollectionReq.builder()
+                .collectionName(randomCollectionName)
+                .build());
+
+        // get query segment info
+        GetQuerySegmentInfoResp qSegInfo = client.getQuerySegmentInfo(GetQuerySegmentInfoReq.builder()
+                .collectionName(randomCollectionName)
+                .build());
+        Assertions.assertEquals(1, qSegInfo.getSegmentInfos().size());
+        GetQuerySegmentInfoResp.QuerySegmentInfo qInfo = qSegInfo.getSegmentInfos().get(0);
+        Assertions.assertTrue(qInfo.getSegmentID() > 0L);
+        Assertions.assertTrue(qInfo.getCollectionID() > 0L);
+        Assertions.assertTrue(qInfo.getPartitionID() > 0L);
+        Assertions.assertTrue(qInfo.getMemSize() >= 0L);
+        Assertions.assertEquals(count, qInfo.getNumOfRows());
+        Assertions.assertEquals(vectorFieldName, qInfo.getIndexName());
+        Assertions.assertTrue(qInfo.getIndexID() > 0L);
+        Assertions.assertEquals("Sealed", qInfo.getState());
+        Assertions.assertEquals("L1", qInfo.getLevel());
+        Assertions.assertEquals(1, qInfo.getNodeIDs().size());
+        Assertions.assertTrue(qInfo.getNodeIDs().get(0) > 0L);
+        Assertions.assertTrue(qInfo.getIsSorted());
 
         // create partition, upsert one row to the partition
         String partitionName = "PPP";
@@ -999,17 +1045,14 @@ class MilvusClientV2DockerTest {
                 .build());
         Assertions.assertEquals("desc_B", descResp.getDescription());
 
-        client.dropCollection(DropCollectionReq.builder()
-                .collectionName("BBB")
-                .build());
-
-        Assertions.assertThrows(MilvusClientException.class, ()->client.describeCollection(DescribeCollectionReq.builder()
-                .collectionName("CCC")
-                .build()));
-
+        // must drop or alter alias before dropping the collection
         client.alterAlias(AlterAliasReq.builder()
                 .collectionName("AAA")
                 .alias("CCC")
+                .build());
+
+        client.dropCollection(DropCollectionReq.builder()
+                .collectionName("BBB")
                 .build());
 
         descResp = client.describeCollection(DescribeCollectionReq.builder()
@@ -1205,6 +1248,9 @@ class MilvusClientV2DockerTest {
         Map<String, String> indexProps = desc.getProperties();
         Assertions.assertTrue(indexProps.containsKey(Constant.MMAP_ENABLED));
         Assertions.assertEquals("false", indexProps.get(Constant.MMAP_ENABLED));
+        extraParams = desc.getExtraParams();
+        Assertions.assertTrue(extraParams.containsKey(Constant.MMAP_ENABLED));
+        Assertions.assertEquals("false", extraParams.get(Constant.MMAP_ENABLED));
 
         client.dropIndexProperties(DropIndexPropertiesReq.builder()
                 .collectionName(randomCollectionName)
@@ -1218,6 +1264,8 @@ class MilvusClientV2DockerTest {
         desc = descResp.getIndexDescByFieldName("vector");
         indexProps = desc.getProperties();
         Assertions.assertFalse(indexProps.containsKey(Constant.MMAP_ENABLED));
+        extraParams = desc.getExtraParams();
+        Assertions.assertFalse(extraParams.containsKey(Constant.MMAP_ENABLED));
 
         // drop index
         client.dropIndex(DropIndexReq.builder()
@@ -1438,12 +1486,13 @@ class MilvusClientV2DockerTest {
                 Assertions.assertEquals(DIMENSION*2, bfloat16Vector.limit());
 
                 SortedMap<Long, Float> sparseVector = (SortedMap<Long, Float>)record.get("sparse_vector");
-                Assertions.assertTrue(sparseVector.size() >= 10 && sparseVector.size() <= 20); // defined in generateSparseVector()
+                Assertions.assertTrue(sparseVector.size() >= 10 && sparseVector.size() < 20); // defined in generateSparseVector()
 
                 counter++;
             }
         }
         System.out.println(String.format("There are %d items match score between [5.0, 50.0]", counter));
+        Assertions.assertTrue(counter > 0);
 
         // query iterator
         QueryIterator queryIterator = client.queryIterator(QueryIteratorReq.builder()
@@ -1509,6 +1558,73 @@ class MilvusClientV2DockerTest {
             }
         }
         Assertions.assertEquals(295, counter);
+
+        // search iterator V2
+        SearchIteratorV2 searchIteratorV2 = client.searchIteratorV2(SearchIteratorReqV2.builder()
+                .collectionName(randomCollectionName)
+                .outputFields(Lists.newArrayList("*"))
+                .batchSize(1000L)
+                .vectorFieldName("float_vector")
+                .filter("id >= 50")
+                .vectors(Collections.singletonList(new FloatVec(utils.generateFloatVector())))
+                .metricType(IndexParam.MetricType.L2)
+                .consistencyLevel(ConsistencyLevel.EVENTUALLY)
+                .build());
+        counter = 0;
+        while (true) {
+            List<SearchResp.SearchResult> res = searchIteratorV2.next();
+            if (res.isEmpty()) {
+                System.out.println("search iteration finished, close");
+                searchIteratorV2.close();
+                break;
+            }
+
+            for (SearchResp.SearchResult record : res) {
+                Map<String, Object> entity = record.getEntity();
+                Assertions.assertInstanceOf(Boolean.class, entity.get("bool_field"));
+                Assertions.assertInstanceOf(Integer.class, entity.get("int8_field"));
+                Assertions.assertInstanceOf(Integer.class, entity.get("int16_field"));
+                Assertions.assertInstanceOf(Integer.class, entity.get("int32_field"));
+                Assertions.assertInstanceOf(Long.class, entity.get("int64_field"));
+                Assertions.assertInstanceOf(Float.class, entity.get("float_field"));
+                Assertions.assertInstanceOf(Double.class, entity.get("double_field"));
+                Assertions.assertInstanceOf(String.class, entity.get("varchar_field"));
+                Assertions.assertInstanceOf(JsonObject.class, entity.get("json_field"));
+                Assertions.assertInstanceOf(List.class, entity.get("arr_int_field"));
+                Assertions.assertInstanceOf(List.class, entity.get("float_vector"));
+                Assertions.assertInstanceOf(ByteBuffer.class, entity.get("binary_vector"));
+                Assertions.assertInstanceOf(ByteBuffer.class, entity.get("bfloat16_vector"));
+                Assertions.assertInstanceOf(SortedMap.class, entity.get("sparse_vector"));
+
+                String varcharVal = (String)entity.get("varchar_field");
+                Assertions.assertTrue(varcharVal.startsWith("varchar_"));
+
+                long int64Val = (long)entity.get("int64_field");
+                Assertions.assertEquals(int64Val, (long)record.getId());
+                JsonObject jsonObj = (JsonObject)entity.get("json_field");
+                Assertions.assertTrue(jsonObj.has(String.format("JSON_%d", int64Val)));
+
+                List<Integer> intArr = (List<Integer>)entity.get("arr_int_field");
+                Assertions.assertTrue(intArr.size() <= 50); // max capacity 50 is defined in the baseSchema()
+
+                List<Float> floatVector = (List<Float>)entity.get("float_vector");
+                Assertions.assertEquals(DIMENSION, floatVector.size());
+
+                ByteBuffer binaryVector = (ByteBuffer)entity.get("binary_vector");
+                Assertions.assertEquals(DIMENSION, binaryVector.limit()*8);
+
+                ByteBuffer bfloat16Vector = (ByteBuffer)entity.get("bfloat16_vector");
+                Assertions.assertEquals(DIMENSION*2, bfloat16Vector.limit());
+
+                SortedMap<Long, Float> sparseVector = (SortedMap<Long, Float>)entity.get("sparse_vector");
+                Assertions.assertTrue(sparseVector.size() >= 10 && sparseVector.size() <= 20); // defined in generateSparseVector()
+
+                counter++;
+            }
+        }
+        // search iterator could not ensure that all the entities can be retrieved
+        // expect count is 9950, but sometimes it returns 9949 or 9948
+        Assertions.assertTrue(counter > ((int)count - 55) && counter <= ((int)count - 50));
 
         client.dropCollection(DropCollectionReq.builder().collectionName(randomCollectionName).build());
     }
@@ -1818,6 +1934,13 @@ class MilvusClientV2DockerTest {
                 .isNullable(Boolean.TRUE)
                 .maxLength(100)
                 .build());
+        collectionSchema.addField(AddFieldReq.builder()
+                .fieldName("arr")
+                .dataType(DataType.Array)
+                .elementType(DataType.Int32)
+                .isNullable(Boolean.TRUE)
+                .maxCapacity(100)
+                .build());
 
         List<IndexParam> indexParams = new ArrayList<>();
         indexParams.add(IndexParam.builder()
@@ -1846,7 +1969,11 @@ class MilvusClientV2DockerTest {
             } else {
 //                row.add("flag", JsonNull.INSTANCE);
                 row.addProperty("desc", "AAA");
+
+                List<Integer> arr = Arrays.asList(5, 6);
+                row.add("arr", JsonUtils.toJsonTree(arr));
             }
+
             data.add(row);
         }
 
@@ -1856,11 +1983,30 @@ class MilvusClientV2DockerTest {
                 .build());
         Assertions.assertEquals(10, insertResp.getInsertCnt());
 
+        Function<Map<String, Object>, Void> checkFunc =
+                entity -> {
+                    long id = (long)entity.get("id");
+                    if (id%2 == 0) {
+                        Assertions.assertEquals((int)id, entity.get("flag"));
+                        Assertions.assertNull(entity.get("desc"));
+                        Assertions.assertNull(entity.get("arr"));
+                    } else {
+                        Assertions.assertEquals(10, entity.get("flag"));
+                        Assertions.assertEquals("AAA", entity.get("desc"));
+                        Object obj = entity.get("arr");
+                        Assertions.assertInstanceOf(List.class, obj);
+                        List<Integer> arr = (List<Integer>)obj;
+                        Assertions.assertEquals(2, arr.size());
+                        Assertions.assertEquals(5, arr.get(0));
+                        Assertions.assertEquals(6, arr.get(1));
+                    }
+                    return null;
+                };
         // query
         QueryResp queryResp = client.query(QueryReq.builder()
                 .collectionName(randomCollectionName)
                 .filter("id >= 0")
-                .outputFields(Lists.newArrayList("*"))
+                .outputFields(Arrays.asList("desc", "flag", "arr"))
                 .consistencyLevel(ConsistencyLevel.STRONG)
                 .build());
         List<QueryResp.QueryResult> queryResults = queryResp.getQueryResults();
@@ -1868,14 +2014,7 @@ class MilvusClientV2DockerTest {
         System.out.println("Query results:");
         for (QueryResp.QueryResult result : queryResults) {
             Map<String, Object> entity = result.getEntity();
-            long id = (long)entity.get("id");
-            if (id%2 == 0) {
-                Assertions.assertEquals((int)id, entity.get("flag"));
-                Assertions.assertNull(entity.get("desc"));
-            } else {
-                Assertions.assertEquals(10, entity.get("flag"));
-                Assertions.assertEquals("AAA", entity.get("desc"));
-            }
+            checkFunc.apply(entity);
             System.out.println(result);
         }
 
@@ -1896,13 +2035,7 @@ class MilvusClientV2DockerTest {
         for (SearchResp.SearchResult result : firstResults) {
             long id = (long)result.getId();
             Map<String, Object> entity = result.getEntity();
-            if (id%2 == 0) {
-                Assertions.assertEquals((int)id, entity.get("flag"));
-                Assertions.assertNull(entity.get("desc"));
-            } else {
-                Assertions.assertEquals(10, entity.get("flag"));
-                Assertions.assertEquals("AAA", entity.get("desc"));
-            }
+            checkFunc.apply(entity);
             System.out.println(result);
         }
     }
@@ -2191,5 +2324,59 @@ class MilvusClientV2DockerTest {
                 .collectionName(collectionName)
                 .dimension(DIMENSION)
                 .build());
+    }
+
+    @Test
+    void testReplica() {
+        String randomCollectionName = generator.generate(10);
+
+        String vectorFieldName = "float_vector";
+        CreateCollectionReq.CollectionSchema collectionSchema = baseSchema();
+        collectionSchema.addField(AddFieldReq.builder()
+                .fieldName(vectorFieldName)
+                .dataType(DataType.FloatVector)
+                .dimension(DIMENSION)
+                .build());
+
+        IndexParam indexParam = IndexParam.builder()
+                .fieldName(vectorFieldName)
+                .indexType(IndexParam.IndexType.AUTOINDEX)
+                .metricType(IndexParam.MetricType.COSINE)
+                .build();
+
+        CreateCollectionReq requestCreate = CreateCollectionReq.builder()
+                .collectionName(randomCollectionName)
+                .collectionSchema(collectionSchema)
+                .indexParams(Collections.singletonList(indexParam))
+                .build();
+        client.createCollection(requestCreate);
+
+        // insert rows
+        long count = 10000;
+        List<JsonObject> data = generateRandomData(collectionSchema, count);
+        InsertResp insertResp = client.insert(InsertReq.builder()
+                .collectionName(randomCollectionName)
+                .data(data)
+                .build());
+        Assertions.assertEquals(count, insertResp.getInsertCnt());
+
+        DescribeCollectionResp descCollResp = client.describeCollection(DescribeCollectionReq.builder()
+                .collectionName(randomCollectionName)
+                .build());
+
+        DescribeReplicasResp descReplicaResp = client.describeReplicas(DescribeReplicasReq.builder()
+                .collectionName(randomCollectionName)
+                .build());
+        Assertions.assertEquals(1, descReplicaResp.getReplicas().size());
+        io.milvus.v2.service.collection.ReplicaInfo info = descReplicaResp.getReplicas().get(0);
+        Assertions.assertEquals(descCollResp.getCollectionID(), info.getCollectionID());
+        Assertions.assertEquals(1, info.getNodeIDs().size());
+        Assertions.assertNotEquals(0L, info.getReplicaID());
+        Assertions.assertFalse(info.getResourceGroupName().isEmpty());
+        Assertions.assertEquals(1, info.getShardReplicas().size());
+        io.milvus.v2.service.collection.ShardReplica replica = info.getShardReplicas().get(0);
+        Assertions.assertFalse(replica.getChannelName().isEmpty());
+        Assertions.assertFalse(replica.getLeaderAddress().isEmpty());
+        Assertions.assertNotEquals(0L, replica.getLeaderID());
     }
 }

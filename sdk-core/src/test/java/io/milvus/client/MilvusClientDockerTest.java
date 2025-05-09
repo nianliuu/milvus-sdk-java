@@ -41,10 +41,7 @@ import io.milvus.param.highlevel.dml.DeleteIdsParam;
 import io.milvus.param.highlevel.dml.GetIdsParam;
 import io.milvus.param.highlevel.dml.response.DeleteResponse;
 import io.milvus.param.highlevel.dml.response.GetResponse;
-import io.milvus.param.index.CreateIndexParam;
-import io.milvus.param.index.DescribeIndexParam;
-import io.milvus.param.index.DropIndexParam;
-import io.milvus.param.index.GetIndexStateParam;
+import io.milvus.param.index.*;
 import io.milvus.param.partition.GetPartitionStatisticsParam;
 import io.milvus.param.partition.ShowPartitionsParam;
 import io.milvus.pool.MilvusClientV1Pool;
@@ -78,7 +75,7 @@ class MilvusClientDockerTest {
     private static final TestUtils utils = new TestUtils(DIMENSION);
 
     @Container
-    private static final MilvusContainer milvus = new MilvusContainer("milvusdb/milvus:v2.5.2");
+    private static final MilvusContainer milvus = new MilvusContainer("milvusdb/milvus:v2.5.8");
 
     @BeforeAll
     public static void setUp() {
@@ -457,13 +454,14 @@ class MilvusClientDockerTest {
         Assertions.assertEquals(R.Status.Success.getCode(), createIndexR.getStatus().intValue());
 
         // create index on vector field
+        String params = "{\"efConstruction\":64,\"M\":16,\"mmap.enabled\":true}";
         indexParam = CreateIndexParam.newBuilder()
                 .withCollectionName(randomCollectionName)
                 .withFieldName(DataType.FloatVector.name())
                 .withIndexName("abv")
                 .withIndexType(IndexType.HNSW)
                 .withMetricType(MetricType.L2)
-                .withExtraParam("{\"M\":16,\"efConstruction\":64}")
+                .withExtraParam(params)
                 .withSyncMode(Boolean.TRUE)
                 .withSyncWaitingInterval(500L)
                 .withSyncWaitingTimeout(30L)
@@ -491,7 +489,23 @@ class MilvusClientDockerTest {
         Assertions.assertEquals(rowCount, indexDesc.getIndexedRows());
         Assertions.assertEquals(0L, indexDesc.getPendingIndexRows());
         Assertions.assertTrue(indexDesc.getIndexFailedReason().isEmpty());
+        String extraParams = indexDesc.getExtraParam();
+        Assertions.assertEquals(params.replace("\"", ""), extraParams.replace("\"", ""));
         System.out.println("Index description: " + indexDesc.toString());
+
+        R<RpcStatus> alterR = client.alterIndex(AlterIndexParam.newBuilder()
+                .withCollectionName(randomCollectionName)
+                .withIndexName("abv")
+                .withMMapEnabled(false)
+                .build());
+        Assertions.assertEquals(R.Status.Success.getCode(), alterR.getStatus().intValue());
+
+        descIndexR = client.describeIndex(descIndexParam);
+        Assertions.assertEquals(R.Status.Success.getCode(), descIndexR.getStatus().intValue());
+        indexDescWrapper = new DescIndexResponseWrapper(descIndexR.getData());
+        indexDesc = indexDescWrapper.getIndexDescByFieldName(DataType.FloatVector.name());
+        extraParams = indexDesc.getExtraParam();
+        Assertions.assertEquals("{efConstruction:64,M:16,mmap.enabled:false}", extraParams.replace("\"", ""));
 
         // load collection
         R<RpcStatus> loadR = client.loadCollection(LoadCollectionParam.newBuilder()
@@ -1057,6 +1071,25 @@ class MilvusClientDockerTest {
 
         R<RpcStatus> dropR = client.dropCollection(dropParam);
         Assertions.assertEquals(R.Status.Success.getCode(), dropR.getStatus().intValue());
+    }
+
+    @Test
+    void testFloat16Utils() {
+        List<List<Float>> originVectors = utils.generateFloatVectors(10);
+
+        for (List<Float> originalVector : originVectors) {
+            ByteBuffer fp16Buffer = Float16Utils.f32VectorToFp16Buffer(originalVector);
+            List<Float> fp16Vec = Float16Utils.fp16BufferToVector(fp16Buffer);
+            for (int i = 0; i < originalVector.size(); i++) {
+                Assertions.assertEquals(fp16Vec.get(i), originalVector.get(i), 0.01);
+            }
+
+            ByteBuffer bf16Buffer = Float16Utils.f32VectorToBf16Buffer(originalVector);
+            List<Float> bf16Vec = Float16Utils.bf16BufferToVector(bf16Buffer);
+            for (int i = 0; i < originalVector.size(); i++) {
+                Assertions.assertEquals(bf16Vec.get(i), originalVector.get(i), 0.1);
+            }
+        }
     }
 
     @Test

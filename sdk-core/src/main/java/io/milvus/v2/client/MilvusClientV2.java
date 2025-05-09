@@ -23,6 +23,7 @@ import io.grpc.ManagedChannel;
 import io.milvus.grpc.*;
 import io.milvus.orm.iterator.QueryIterator;
 import io.milvus.orm.iterator.SearchIterator;
+import io.milvus.orm.iterator.SearchIteratorV2;
 
 import io.milvus.v2.service.database.DatabaseService;
 import io.milvus.v2.service.database.request.*;
@@ -378,6 +379,15 @@ public class MilvusClientV2 {
         return rpcUtils.retry(()->collectionService.getLoadState(this.getRpcStub(), request));
     }
 
+    /**
+     * Get information of all replicas from a collection.
+     *
+     * @param request {@link DescribeReplicasReq}
+     */
+    public DescribeReplicasResp describeReplicas(DescribeReplicasReq request) {
+        return rpcUtils.retry(()->collectionService.describeReplicas(this.getRpcStub(), request));
+    }
+
     /////////////////////////////////////////////////////////////////////////////////////////////
     // Index Operations
     /////////////////////////////////////////////////////////////////////////////////////////////
@@ -533,6 +543,16 @@ public class MilvusClientV2 {
      */
     public SearchIterator searchIterator(SearchIteratorReq request) {
         return rpcUtils.retry(()->vectorService.searchIterator(this.getRpcStub(), request));
+    }
+
+    /**
+     * Get searchIteratorV2 based on a vector field. Use expression to do filtering before search.
+     *
+     * @param request {@link SearchIteratorReqV2}
+     * @return {status:result code, data: SearchIteratorV2}
+     */
+    public SearchIteratorV2 searchIteratorV2(SearchIteratorReqV2 request) {
+        return rpcUtils.retry(()->vectorService.searchIteratorV2(this.getRpcStub(), request));
     }
 
     /////////////////////////////////////////////////////////////////////////////////////////////
@@ -793,6 +813,15 @@ public class MilvusClientV2 {
     }
 
     /**
+     * Transfer query nodes from source resource group to target resource_group.
+     *
+     * @param request {@link TransferNodeReq}
+     */
+    public void transferNode(TransferNodeReq request) {
+        rpcUtils.retry(()->rgroupService.transferNode(this.getRpcStub(), request));
+    }
+
+    /**
      * Transfer a replica from source resource group to target resource_group.
      *
      * @param request {@link TransferReplicaReq}
@@ -867,6 +896,28 @@ public class MilvusClientV2 {
     }
 
     /**
+     * Gets the information of persistent segments from data node, including row count,
+     * persistence state(growing or flushed), etc.
+     *
+     * @param request get request
+     * @return GetPersistentSegmentInfoResp
+     */
+    public GetPersistentSegmentInfoResp getPersistentSegmentInfo(GetPersistentSegmentInfoReq request) {
+        return rpcUtils.retry(()->utilityService.getPersistentSegmentInfo(this.getRpcStub(), request));
+    }
+
+    /**
+     * Gets the query information of segments in a collection from query node, including row count,
+     * memory usage size, index name, etc.
+     *
+     * @param request get request
+     * @return GetQuerySegmentInfoResp
+     */
+    public GetQuerySegmentInfoResp getQuerySegmentInfo(GetQuerySegmentInfoReq request){
+        return rpcUtils.retry(()->utilityService.getQuerySegmentInfo(this.getRpcStub(), request));
+    }
+
+    /**
      * trigger an asynchronous compaction in server side
      *
      * @param request compact request
@@ -893,6 +944,15 @@ public class MilvusClientV2 {
      */
     public String getServerVersion() {
         return rpcUtils.retry(()->clientUtils.getServerVersion(this.getRpcStub()));
+    }
+
+    /**
+     * Check server health
+     *
+     * @return CheckHealthResp
+     */
+    public CheckHealthResp checkHealth() {
+        return rpcUtils.retry(()->utilityService.checkHealth(this.getRpcStub()));
     }
 
     /**

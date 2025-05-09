@@ -5,7 +5,7 @@ package com.zilliz.milvustestv2.common;
  * @Date 2024/1/31 18:03
  */
 public class CommonData {
-    public static long numberEntities=2000;
+    public static long numberEntities=5000;
     public static long batchSize=1000;
     public static int dim=128;
     public static String defaultFloatVectorCollection="FloatVectorCollection";
@@ -27,11 +27,15 @@ public class CommonData {
     public static String fieldVarchar="fieldVarchar";
     public static String fieldFloat="fieldFloat";
     public static String fieldJson="fieldJson";
+
+    public static String fieldDynamic="fieldDynamic";
+    public static String fieldDynamicNotExist="fieldDynamicNotExist";
     public static String fieldFloatVector="fieldFloatVector";
     public static String fieldBinaryVector="fieldBinaryVector";
     public static String fieldFloat16Vector="fieldFloat16Vector";
     public static String fieldBF16Vector="fieldBF16Vector";
     public static String fieldSparseVector="fieldSparseVector";
+
 
     public static String partitionName="partitionName";
     // 快速创建时候的默认向量filed
@@ -49,8 +53,9 @@ public class CommonData {
 
     public static String roleName="role02";
 
-    public static String databaseName="database01";
+    public static String databaseName="database00";
     public static String databaseName2="database02";
+    public static String databaseName1="database01";
 
     public static short defaultValueShort = 1;
     public static int defaultValueInt = 1;
@@ -58,6 +63,12 @@ public class CommonData {
     public static double defaultValueDouble = 1.0;
     public static boolean defaultValueBool = true;
     public static String defaultValueString = "1.0";
+
+    public static int groupSize = 3;
+    public static String resourceGroup="resourceGroup01";
+    public static String defaultResourceGroup="__default_resource_group";
+    public static String resourceGroup2="resourceGroup02";
+
 
 
 

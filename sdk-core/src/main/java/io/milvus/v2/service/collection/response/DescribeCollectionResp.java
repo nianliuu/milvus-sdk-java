@@ -33,6 +33,7 @@ import java.util.Map;
 @SuperBuilder
 public class DescribeCollectionResp {
     private String collectionName;
+    private Long collectionID;
     private String databaseName;
     private String description;
     private Long numOfPartitions;
@@ -45,6 +46,7 @@ public class DescribeCollectionResp {
 
     private CreateCollectionReq.CollectionSchema collectionSchema;
     private Long createTime;
+    private Long createUtcTime;
     private ConsistencyLevel consistencyLevel;
     private Integer shardsNum;
     @Builder.Default

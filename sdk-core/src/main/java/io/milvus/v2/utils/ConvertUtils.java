@@ -97,9 +97,14 @@ public class ConvertUtils {
                     // may throw IllegalArgumentException
                     metricType = IndexParam.MetricType.valueOf(param.getValue());
                 } else if (param.getKey().equals(Constant.MMAP_ENABLED)) {
-                    properties.put(param.getKey(), param.getValue());
+                    properties.put(param.getKey(), param.getValue()); // just for compatible with old versions
+                    extraParams.put(param.getKey(), param.getValue());
                 } else if (param.getKey().equals(Constant.PARAMS)) {
-                    extraParams = JsonUtils.fromJson(param.getValue(), new TypeToken<Map<String, String>>() {}.getType());
+                    Map<String, String> tempParams = JsonUtils.fromJson(param.getValue(), new TypeToken<Map<String, String>>() {}.getType());
+                    tempParams.remove(Constant.MMAP_ENABLED); // "mmap.enabled" in "params" is not processed by server
+                    extraParams.putAll(tempParams);
+                } else {
+                    extraParams.put(param.getKey(), param.getValue());
                 }
             }
 
@@ -129,6 +134,7 @@ public class ConvertUtils {
 
         DescribeCollectionResp describeCollectionResp = DescribeCollectionResp.builder()
                 .collectionName(response.getCollectionName())
+                .collectionID(response.getCollectionID())
                 .databaseName(response.getDbName())
                 .description(response.getSchema().getDescription())
                 .numOfPartitions(response.getNumPartitions())
@@ -139,6 +145,7 @@ public class ConvertUtils {
                 .vectorFieldNames(response.getSchema().getFieldsList().stream().filter(fieldSchema -> ParamUtils.isVectorDataType(fieldSchema.getDataType())).map(FieldSchema::getName).collect(java.util.stream.Collectors.toList()))
                 .primaryFieldName(response.getSchema().getFieldsList().stream().filter(FieldSchema::getIsPrimaryKey).map(FieldSchema::getName).collect(java.util.stream.Collectors.toList()).get(0))
                 .createTime(response.getCreatedTimestamp())
+                .createUtcTime(response.getCreatedUtcTimestamp())
                 .consistencyLevel(io.milvus.v2.common.ConsistencyLevel.valueOf(response.getConsistencyLevel().name().toUpperCase()))
                 .shardsNum(response.getShardsNum())
                 .properties(properties)

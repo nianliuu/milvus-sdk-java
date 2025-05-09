@@ -16,7 +16,7 @@
  * specific language governing permissions and limitations
  * under the License.
  */
-package io.milvus.v2;
+package io.milvus.v1;
 
 import com.fasterxml.jackson.annotation.JsonProperty;
 import com.fasterxml.jackson.dataformat.csv.CsvMapper;
@@ -46,15 +46,29 @@ import io.milvus.bulkwriter.request.import_.CloudImportRequest;
 import io.milvus.bulkwriter.request.import_.MilvusImportRequest;
 import io.milvus.bulkwriter.request.list.CloudListImportJobsRequest;
 import io.milvus.bulkwriter.request.list.MilvusListImportJobsRequest;
-import io.milvus.v1.CommonUtils;
-import io.milvus.v2.client.ConnectConfig;
-import io.milvus.v2.client.MilvusClientV2;
-import io.milvus.v2.common.ConsistencyLevel;
-import io.milvus.v2.common.IndexParam;
-import io.milvus.v2.service.collection.request.*;
-import io.milvus.v2.service.index.request.CreateIndexReq;
-import io.milvus.v2.service.vector.request.QueryReq;
-import io.milvus.v2.service.vector.response.QueryResp;
+import io.milvus.client.MilvusClient;
+import io.milvus.client.MilvusServiceClient;
+import io.milvus.common.utils.ExceptionUtils;
+import io.milvus.grpc.DataType;
+import io.milvus.grpc.GetCollectionStatisticsResponse;
+import io.milvus.grpc.QueryResults;
+import io.milvus.param.ConnectParam;
+import io.milvus.param.IndexType;
+import io.milvus.param.MetricType;
+import io.milvus.param.R;
+import io.milvus.param.RpcStatus;
+import io.milvus.param.collection.CollectionSchemaParam;
+import io.milvus.param.collection.CreateCollectionParam;
+import io.milvus.param.collection.DropCollectionParam;
+import io.milvus.param.collection.FieldType;
+import io.milvus.param.collection.FlushParam;
+import io.milvus.param.collection.GetCollectionStatisticsParam;
+import io.milvus.param.collection.HasCollectionParam;
+import io.milvus.param.collection.LoadCollectionParam;
+import io.milvus.param.dml.QueryParam;
+import io.milvus.param.index.CreateIndexParam;
+import io.milvus.response.GetCollStatResponseWrapper;
+import io.milvus.response.QueryResultsWrapper;
 import org.apache.avro.generic.GenericData;
 import org.apache.http.util.Asserts;
 
@@ -62,7 +76,10 @@ import java.io.File;
 import java.io.IOException;
 import java.net.URL;
 import java.nio.ByteBuffer;
-import java.util.*;
+import java.util.ArrayList;
+import java.util.Iterator;
+import java.util.List;
+import java.util.Map;
 import java.util.concurrent.TimeUnit;
 
 
@@ -141,11 +158,11 @@ public class BulkWriterExample {
         public static final String OBJECT_SECRET_KEY = "_your_storage_secret_key_";
     }
 
-    private static final String SIMPLE_COLLECTION_NAME = "java_sdk_bulkwriter_simple_v2";
-    private static final String ALL_TYPES_COLLECTION_NAME = "java_sdk_bulkwriter_all_v2";
+    private static final String SIMPLE_COLLECTION_NAME = "java_sdk_bulkwriter_simple_v1";
+    private static final String ALL_TYPES_COLLECTION_NAME = "java_sdk_bulkwriter_all_v1";
     private static final Integer DIM = 512;
     private static final Integer ARRAY_CAPACITY = 10;
-    private MilvusClientV2 milvusClient;
+    private MilvusClient milvusClient;
 
     public static void main(String[] args) throws Exception {
 
@@ -153,6 +170,8 @@ public class BulkWriterExample {
         exampleBulkWriter.createConnection();
 
         List<BulkFileType> fileTypes = Lists.newArrayList(
+                BulkFileType.JSON,
+                BulkFileType.CSV,
                 BulkFileType.PARQUET
         );
 
@@ -165,17 +184,17 @@ public class BulkWriterExample {
 
     private void createConnection() {
         System.out.println("\nCreate connection...");
-        String url = String.format("http://%s:%s", HOST, PORT);
-        milvusClient = new MilvusClientV2(ConnectConfig.builder()
-                .uri(url)
-                .username(USER_NAME)
-                .password(PASSWORD)
-                .build());
+        ConnectParam connectParam = ConnectParam.newBuilder()
+                .withHost(HOST)
+                .withPort(PORT)
+                .withAuthorization(USER_NAME, PASSWORD)
+                .build();
+        milvusClient = new MilvusServiceClient(connectParam);
         System.out.println("\nConnected");
     }
 
     private static void exampleSimpleCollection(BulkWriterExample exampleBulkWriter, List<BulkFileType> fileTypes) throws Exception {
-        CreateCollectionReq.CollectionSchema collectionSchema = exampleBulkWriter.buildSimpleSchema();
+        CollectionSchemaParam collectionSchema = exampleBulkWriter.buildSimpleSchema();
         exampleBulkWriter.createCollection(SIMPLE_COLLECTION_NAME, collectionSchema, false);
 
         for (BulkFileType fileType : fileTypes) {
@@ -193,7 +212,7 @@ public class BulkWriterExample {
     private static void exampleAllTypesCollectionRemote(BulkWriterExample exampleBulkWriter, List<BulkFileType> fileTypes) throws Exception {
         // 4 types vectors + all scalar types + dynamic field enabled, use bulkInsert interface
         for (BulkFileType fileType : fileTypes) {
-            CreateCollectionReq.CollectionSchema collectionSchema = buildAllTypesSchema();
+            CollectionSchemaParam collectionSchema = buildAllTypesSchema();
             List<List<String>> batchFiles = exampleBulkWriter.allTypesRemoteWriter(collectionSchema, fileType);
             exampleBulkWriter.callBulkInsert(collectionSchema, batchFiles);
             exampleBulkWriter.retrieveImportData();
@@ -210,13 +229,13 @@ public class BulkWriterExample {
 //        }
     }
 
-    private static void localWriter(CreateCollectionReq.CollectionSchema collectionSchema, BulkFileType fileType) throws Exception {
+    private static void localWriter(CollectionSchemaParam collectionSchema, BulkFileType fileType) throws Exception {
         System.out.printf("\n===================== local writer (%s) ====================%n", fileType.name());
         LocalBulkWriterParam bulkWriterParam = LocalBulkWriterParam.newBuilder()
                 .withCollectionSchema(collectionSchema)
                 .withLocalPath("/tmp/bulk_writer")
                 .withFileType(fileType)
-                .withChunkSize(128 * 1024 * 1024)
+                .withChunkSize(1024 * 1024 * 1024L)
                 .build();
 
         try (LocalBulkWriter localBulkWriter = new LocalBulkWriter(bulkWriterParam)) {
@@ -234,7 +253,6 @@ public class BulkWriterExample {
             }
 
             System.out.printf("%s rows appends%n", localBulkWriter.getTotalRowCount());
-            System.out.printf("%s rows in buffer not flushed%n", localBulkWriter.getBufferRowCount());
 
             localBulkWriter.commit(false);
             List<List<String>> batchFiles = localBulkWriter.getBatchFiles();
@@ -245,7 +263,7 @@ public class BulkWriterExample {
         }
     }
 
-    private static void remoteWriter(CreateCollectionReq.CollectionSchema collectionSchema, BulkFileType fileType) throws Exception {
+    private static void remoteWriter(CollectionSchemaParam collectionSchema, BulkFileType fileType) throws Exception {
         System.out.printf("\n===================== remote writer (%s) ====================%n", fileType.name());
 
         try (RemoteBulkWriter remoteBulkWriter = buildRemoteBulkWriter(collectionSchema, fileType)) {
@@ -263,7 +281,6 @@ public class BulkWriterExample {
             }
 
             System.out.printf("%s rows appends%n", remoteBulkWriter.getTotalRowCount());
-            System.out.printf("%s rows in buffer not flushed%n", remoteBulkWriter.getBufferRowCount());
 
             remoteBulkWriter.commit(false);
             List<List<String>> batchFiles = remoteBulkWriter.getBatchFiles();
@@ -275,7 +292,7 @@ public class BulkWriterExample {
         }
     }
 
-    private static void parallelAppend(CreateCollectionReq.CollectionSchema collectionSchema) throws Exception {
+    private static void parallelAppend(CollectionSchemaParam collectionSchema) throws Exception {
         System.out.print("\n===================== parallel append ====================");
         LocalBulkWriterParam bulkWriterParam = LocalBulkWriterParam.newBuilder()
                 .withCollectionSchema(collectionSchema)
@@ -302,11 +319,10 @@ public class BulkWriterExample {
             }
 
             System.out.println(localBulkWriter.getTotalRowCount() + " rows appends");
-            System.out.println(localBulkWriter.getBufferRowCount() + " rows in buffer not flushed");
             localBulkWriter.commit(false);
             System.out.printf("Append finished, %s rows%n", threadCount * rowsPerThread);
 
-            long rowCount = 0;
+            int rowCount = 0;
             List<List<String>> batchFiles = localBulkWriter.getBatchFiles();
             for (List<String> batch : batchFiles) {
                 for (String filePath : batch) {
@@ -355,7 +371,7 @@ public class BulkWriterExample {
         }
     }
 
-    private List<List<String>> allTypesRemoteWriter(CreateCollectionReq.CollectionSchema collectionSchema, BulkFileType fileType) throws Exception {
+    private List<List<String>> allTypesRemoteWriter(CollectionSchemaParam collectionSchema, BulkFileType fileType) throws Exception {
         System.out.printf("\n===================== all field types (%s) ====================%n", fileType.name());
 
         try (RemoteBulkWriter remoteBulkWriter = buildRemoteBulkWriter(collectionSchema, fileType)) {
@@ -374,7 +390,11 @@ public class BulkWriterExample {
                 rowObject.addProperty("float", i / 3);
                 rowObject.addProperty("double", i / 7);
                 rowObject.addProperty("varchar", "varchar_" + i);
-                rowObject.addProperty("json", String.format("{\"dummy\": %s, \"ok\": \"name_%s\"}", i, i));
+
+                // Note: for JSON field, use gson.fromJson() to construct a real JsonObject
+                // don't use rowObject.addProperty("json", jsonContent) since the value is treated as a string, not a JsonObject
+                String jsonContent = String.format("{\"dummy\": %s, \"ok\": \"name_%s\"}", i, i);
+                rowObject.add("json", GSON_INSTANCE.fromJson(jsonContent, JsonElement.class));
 
                 // vector field
                 rowObject.add("float_vector", GSON_INSTANCE.toJsonTree(CommonUtils.generateFloatVector(DIM)));
@@ -404,7 +424,6 @@ public class BulkWriterExample {
                 remoteBulkWriter.appendRow(rowObject);
             }
             System.out.printf("%s rows appends%n", remoteBulkWriter.getTotalRowCount());
-            System.out.printf("%s rows in buffer not flushed%n", remoteBulkWriter.getBufferRowCount());
             System.out.println("Generate data files...");
             remoteBulkWriter.commit(false);
 
@@ -416,13 +435,13 @@ public class BulkWriterExample {
         }
     }
 
-    private static RemoteBulkWriter buildRemoteBulkWriter(CreateCollectionReq.CollectionSchema collectionSchema, BulkFileType fileType) throws IOException {
+    private static RemoteBulkWriter buildRemoteBulkWriter(CollectionSchemaParam collectionSchema, BulkFileType fileType) throws IOException {
         StorageConnectParam connectParam = buildStorageConnectParam();
         RemoteBulkWriterParam bulkWriterParam = RemoteBulkWriterParam.newBuilder()
                 .withCollectionSchema(collectionSchema)
                 .withRemotePath("bulk_data")
                 .withFileType(fileType)
-                .withChunkSize(512 * 1024 * 1024)
+                .withChunkSize(1024 * 1024 * 1024L)
                 .withConnectParam(connectParam)
                 .build();
         return new RemoteBulkWriter(bulkWriterParam);
@@ -495,13 +514,14 @@ public class BulkWriterExample {
         }
     }
 
-    private void callBulkInsert(CreateCollectionReq.CollectionSchema collectionSchema, List<List<String>> batchFiles) throws InterruptedException {
+    private void callBulkInsert(CollectionSchemaParam collectionSchema, List<List<String>> batchFiles) throws InterruptedException {
         createCollection(ALL_TYPES_COLLECTION_NAME, collectionSchema, true);
 
         String url = String.format("http://%s:%s", HOST, PORT);
         System.out.println("\n===================== import files to milvus ====================");
         MilvusImportRequest milvusImportRequest = MilvusImportRequest.builder()
                 .collectionName(ALL_TYPES_COLLECTION_NAME)
+                .partitionName("")
                 .files(batchFiles)
                 .build();
         String bulkImportResult = BulkImport.bulkImport(url, milvusImportRequest);
@@ -540,6 +560,8 @@ public class BulkWriterExample {
                 System.out.printf("The job %s is running, state:%s progress:%s%n", jobId, state, progress);
             }
         }
+
+        System.out.println("Collection row number: " + getCollectionStatistics());
     }
 
     private void callCloudImport(List<List<String>> batchFiles, String collectionName, String partitionName) throws InterruptedException {
@@ -587,32 +609,30 @@ public class BulkWriterExample {
                 System.out.printf("The job %s is running, state:%s progress:%s%n", jobId, importProgressState, progress);
             }
         }
+
+        System.out.println("Collection row number: " + getCollectionStatistics());
     }
 
     /**
      * @param collectionSchema collection info
      * @param dropIfExist     if collection already exist, will drop firstly and then create again
      */
-    private void createCollection(String collectionName, CreateCollectionReq.CollectionSchema collectionSchema, boolean dropIfExist) {
+    private void createCollection(String collectionName, CollectionSchemaParam collectionSchema, boolean dropIfExist) {
         System.out.println("\n===================== create collection ====================");
         checkMilvusClientIfExist();
-
-        CreateCollectionReq requestCreate = CreateCollectionReq.builder()
-                .collectionName(collectionName)
-                .collectionSchema(collectionSchema)
-                .consistencyLevel(ConsistencyLevel.BOUNDED)
+        CreateCollectionParam collectionParam = CreateCollectionParam.newBuilder()
+                .withCollectionName(collectionName)
+                .withSchema(collectionSchema)
                 .build();
-
-        Boolean has = milvusClient.hasCollection(HasCollectionReq.builder().collectionName(collectionName).build());
-        if (has) {
+        R<Boolean> hasCollection = milvusClient.hasCollection(HasCollectionParam.newBuilder().withCollectionName(collectionName).build());
+        if (hasCollection.getData()) {
             if (dropIfExist) {
-                milvusClient.dropCollection(DropCollectionReq.builder().collectionName(collectionName).build());
-                milvusClient.createCollection(requestCreate);
+                milvusClient.dropCollection(DropCollectionParam.newBuilder().withCollectionName(collectionName).build());
+                milvusClient.createCollection(collectionParam);
             }
         } else {
-            milvusClient.createCollection(requestCreate);
+            milvusClient.createCollection(collectionParam);
         }
-
         System.out.printf("Collection %s created%n", collectionName);
     }
 
@@ -625,42 +645,11 @@ public class BulkWriterExample {
         String expr = String.format("id in %s", QUERY_IDS);
         System.out.println(expr);
 
-        List<QueryResp.QueryResult> results = query(expr, Lists.newArrayList("*"));
+        List<QueryResultsWrapper.RowRecord> rowRecords = query(expr, Lists.newArrayList("*"));
         System.out.println("Query results:");
-        for (QueryResp.QueryResult result : results) {
-            Map<String, Object> entity = result.getEntity();
-            JsonObject rowObject = new JsonObject();
-            // scalar field
-            rowObject.addProperty("id", (Long)entity.get("id"));
-            rowObject.addProperty("bool", (Boolean) entity.get("bool"));
-            rowObject.addProperty("int8", (Integer) entity.get("int8"));
-            rowObject.addProperty("int16", (Integer) entity.get("int16"));
-            rowObject.addProperty("int32", (Integer) entity.get("int32"));
-            rowObject.addProperty("float", (Float) entity.get("float"));
-            rowObject.addProperty("double", (Double) entity.get("double"));
-            rowObject.addProperty("varchar", (String) entity.get("varchar"));
-            rowObject.add("json", (JsonElement) entity.get("json"));
-
-            // vector field
-            rowObject.add("float_vector", GSON_INSTANCE.toJsonTree(entity.get("float_vector")));
-            rowObject.add("binary_vector", GSON_INSTANCE.toJsonTree(((ByteBuffer)entity.get("binary_vector")).array()));
-            rowObject.add("float16_vector", GSON_INSTANCE.toJsonTree(((ByteBuffer)entity.get("float16_vector")).array()));
-            rowObject.add("sparse_vector", GSON_INSTANCE.toJsonTree(entity.get("sparse_vector")));
-
-            // array field
-            rowObject.add("array_bool", GSON_INSTANCE.toJsonTree(entity.get("array_bool")));
-            rowObject.add("array_int8", GSON_INSTANCE.toJsonTree(entity.get("array_int8")));
-            rowObject.add("array_int16", GSON_INSTANCE.toJsonTree(entity.get("array_int16")));
-            rowObject.add("array_int32", GSON_INSTANCE.toJsonTree(entity.get("array_int32")));
-            rowObject.add("array_int64", GSON_INSTANCE.toJsonTree(entity.get("array_int64")));
-            rowObject.add("array_varchar", GSON_INSTANCE.toJsonTree(entity.get("array_varchar")));
-            rowObject.add("array_float", GSON_INSTANCE.toJsonTree(entity.get("array_float")));
-            rowObject.add("array_double", GSON_INSTANCE.toJsonTree(entity.get("array_double")));
-
-            // dynamic field
-            rowObject.addProperty("dynamic", (String) entity.get("dynamic"));
-
-            System.out.println(rowObject);
+        for (QueryResultsWrapper.RowRecord record : rowRecords) {
+            Map<String, Object> fieldValues = record.getFieldValues();
+            System.out.println(fieldValues);
         }
     }
 
@@ -668,74 +657,80 @@ public class BulkWriterExample {
         System.out.println("Create index...");
         checkMilvusClientIfExist();
 
-        List<IndexParam> indexes = new ArrayList<>();
-        indexes.add(IndexParam.builder()
-                .fieldName("float_vector")
-                .indexType(IndexParam.IndexType.FLAT)
-                .metricType(IndexParam.MetricType.L2)
+        R<RpcStatus> response = milvusClient.createIndex(CreateIndexParam.newBuilder()
+                .withCollectionName(ALL_TYPES_COLLECTION_NAME)
+                .withFieldName("float_vector")
+                .withIndexType(IndexType.FLAT)
+                .withMetricType(MetricType.L2)
+                .withSyncMode(Boolean.TRUE)
                 .build());
-        indexes.add(IndexParam.builder()
-                .fieldName("binary_vector")
-                .indexType(IndexParam.IndexType.BIN_FLAT)
-                .metricType(IndexParam.MetricType.HAMMING)
-                .build());
-        indexes.add(IndexParam.builder()
-                .fieldName("float16_vector")
-                .indexType(IndexParam.IndexType.FLAT)
-                .metricType(IndexParam.MetricType.IP)
-                .build());
-        indexes.add(IndexParam.builder()
-                .fieldName("sparse_vector")
-                .indexType(IndexParam.IndexType.SPARSE_WAND)
-                .metricType(IndexParam.MetricType.IP)
-                .build());
+        ExceptionUtils.handleResponseStatus(response);
 
-        milvusClient.createIndex(CreateIndexReq.builder()
-                .collectionName(ALL_TYPES_COLLECTION_NAME)
-                .indexParams(indexes)
+        response = milvusClient.createIndex(CreateIndexParam.newBuilder()
+                .withCollectionName(ALL_TYPES_COLLECTION_NAME)
+                .withFieldName("binary_vector")
+                .withIndexType(IndexType.BIN_FLAT)
+                .withMetricType(MetricType.HAMMING)
+                .withSyncMode(Boolean.TRUE)
                 .build());
+        ExceptionUtils.handleResponseStatus(response);
 
-        milvusClient.loadCollection(LoadCollectionReq.builder()
-                .collectionName(ALL_TYPES_COLLECTION_NAME)
+        response = milvusClient.createIndex(CreateIndexParam.newBuilder()
+                .withCollectionName(ALL_TYPES_COLLECTION_NAME)
+                .withFieldName("float16_vector")
+                .withIndexType(IndexType.FLAT)
+                .withMetricType(MetricType.IP)
+                .withSyncMode(Boolean.TRUE)
                 .build());
+        ExceptionUtils.handleResponseStatus(response);
+
+        response = milvusClient.createIndex(CreateIndexParam.newBuilder()
+                .withCollectionName(ALL_TYPES_COLLECTION_NAME)
+                .withFieldName("sparse_vector")
+                .withIndexType(IndexType.SPARSE_WAND)
+                .withMetricType(MetricType.IP)
+                .withSyncMode(Boolean.TRUE)
+                .build());
+        ExceptionUtils.handleResponseStatus(response);
     }
 
-    private void loadCollection() {
-        System.out.println("Refresh load collection...");
+    private R<RpcStatus> loadCollection() {
+        System.out.println("Loading Collection...");
         checkMilvusClientIfExist();
-        // RefreshLoad is a new interface from v2.5.3,
-        // mainly used when there are new segments generated by bulkinsert request,
-        // force the new segments to be loaded into memory.
-        milvusClient.refreshLoad(RefreshLoadReq.builder()
-                .collectionName(ALL_TYPES_COLLECTION_NAME)
+        R<RpcStatus> response = milvusClient.loadCollection(LoadCollectionParam.newBuilder()
+                .withCollectionName(ALL_TYPES_COLLECTION_NAME)
                 .build());
-        System.out.println("Collection row number: " + getCollectionRowCount());
+        ExceptionUtils.handleResponseStatus(response);
+        return response;
     }
 
-    private List<QueryResp.QueryResult> query(String expr, List<String> outputFields) {
+    private List<QueryResultsWrapper.RowRecord> query(String expr, List<String> outputFields) {
         System.out.println("========== query() ==========");
         checkMilvusClientIfExist();
-        QueryReq test = QueryReq.builder()
-                .collectionName(ALL_TYPES_COLLECTION_NAME)
-                .filter(expr)
-                .outputFields(outputFields)
+        QueryParam test = QueryParam.newBuilder()
+                .withCollectionName(ALL_TYPES_COLLECTION_NAME)
+                .withExpr(expr)
+                .withOutFields(outputFields)
                 .build();
-        QueryResp response = milvusClient.query(test);
-        return response.getQueryResults();
+        R<QueryResults> response = milvusClient.query(test);
+        ExceptionUtils.handleResponseStatus(response);
+        QueryResultsWrapper wrapper = new QueryResultsWrapper(response.getData());
+        return wrapper.getRowRecords();
     }
 
-    private Long getCollectionRowCount() {
-        System.out.println("========== getCollectionRowCount() ==========");
+    private Long getCollectionStatistics() {
+        System.out.println("========== getCollectionStatistics() ==========");
+        // call flush() to flush the insert buffer to storage,
+        // so that the getCollectionStatistics() can get correct number
         checkMilvusClientIfExist();
-
-        // Get row count, set ConsistencyLevel.STRONG to sync the data to query node so that data is visible
-        QueryResp countR = milvusClient.query(QueryReq.builder()
-                .collectionName(ALL_TYPES_COLLECTION_NAME)
-                .filter("")
-                .outputFields(Collections.singletonList("count(*)"))
-                .consistencyLevel(ConsistencyLevel.STRONG)
-                .build());
-        return (long)countR.getQueryResults().get(0).getEntity().get("count(*)");
+        milvusClient.flush(FlushParam.newBuilder().addCollectionName(ALL_TYPES_COLLECTION_NAME).build());
+        R<GetCollectionStatisticsResponse> response = milvusClient.getCollectionStatistics(
+                GetCollectionStatisticsParam.newBuilder()
+                        .withCollectionName(ALL_TYPES_COLLECTION_NAME)
+                        .build());
+        ExceptionUtils.handleResponseStatus(response);
+        GetCollStatResponseWrapper wrapper = new GetCollStatResponseWrapper(response.getData());
+        return wrapper.getRowCount();
     }
 
     private static void exampleCloudImport() {
@@ -762,152 +757,177 @@ public class BulkWriterExample {
         System.out.println(listImportJobsResult);
     }
 
-    private CreateCollectionReq.CollectionSchema buildSimpleSchema() {
-        CreateCollectionReq.CollectionSchema schemaV2 = CreateCollectionReq.CollectionSchema.builder()
+    private CollectionSchemaParam buildSimpleSchema() {
+        FieldType fieldType1 = FieldType.newBuilder()
+                .withName("id")
+                .withDataType(DataType.Int64)
+                .withPrimaryKey(true)
+                .withAutoID(true)
                 .build();
-        schemaV2.addField(AddFieldReq.builder()
-                .fieldName("id")
-                .dataType(io.milvus.v2.common.DataType.Int64)
-                .isPrimaryKey(Boolean.TRUE)
-                .autoID(true)
-                .build());
-        schemaV2.addField(AddFieldReq.builder()
-                .fieldName("path")
-                .dataType(io.milvus.v2.common.DataType.VarChar)
-                .maxLength(512)
-                .build());
-        schemaV2.addField(AddFieldReq.builder()
-                .fieldName("label")
-                .dataType(io.milvus.v2.common.DataType.VarChar)
-                .maxLength(512)
-                .build());
-        schemaV2.addField(AddFieldReq.builder()
-                .fieldName("vector")
-                .dataType(io.milvus.v2.common.DataType.FloatVector)
-                .dimension(DIM)
-                .build());
 
-        return schemaV2;
+        // vector field
+        FieldType fieldType2 = FieldType.newBuilder()
+                .withName("vector")
+                .withDataType(DataType.FloatVector)
+                .withDimension(DIM)
+                .build();
+
+        // scalar field
+        FieldType fieldType3 = FieldType.newBuilder()
+                .withName("path")
+                .withDataType(DataType.VarChar)
+                .withMaxLength(512)
+                .build();
+
+        FieldType fieldType4 = FieldType.newBuilder()
+                .withName("label")
+                .withDataType(DataType.VarChar)
+                .withMaxLength(512)
+                .build();
+
+        return CollectionSchemaParam.newBuilder()
+                .addFieldType(fieldType1)
+                .addFieldType(fieldType2)
+                .addFieldType(fieldType3)
+                .addFieldType(fieldType4)
+                .build();
     }
 
-    private static CreateCollectionReq.CollectionSchema buildAllTypesSchema() {
-        CreateCollectionReq.CollectionSchema schemaV2 = CreateCollectionReq.CollectionSchema.builder()
-                .enableDynamicField(true)
-                .build();
+    private static CollectionSchemaParam buildAllTypesSchema() {
+        List<FieldType> fieldTypes = new ArrayList<>();
         // scalar field
-        schemaV2.addField(AddFieldReq.builder()
-                .fieldName("id")
-                .dataType(io.milvus.v2.common.DataType.Int64)
-                .isPrimaryKey(Boolean.TRUE)
-                .autoID(false)
+        fieldTypes.add(FieldType.newBuilder()
+                .withName("id")
+                .withDataType(DataType.Int64)
+                .withPrimaryKey(true)
+                .withAutoID(false)
                 .build());
-        schemaV2.addField(AddFieldReq.builder()
-                .fieldName("bool")
-                .dataType(io.milvus.v2.common.DataType.Bool)
+
+        fieldTypes.add(FieldType.newBuilder()
+                .withName("bool")
+                .withDataType(DataType.Bool)
                 .build());
-        schemaV2.addField(AddFieldReq.builder()
-                .fieldName("int8")
-                .dataType(io.milvus.v2.common.DataType.Int8)
+
+        fieldTypes.add(FieldType.newBuilder()
+                .withName("int8")
+                .withDataType(DataType.Int8)
                 .build());
-        schemaV2.addField(AddFieldReq.builder()
-                .fieldName("int16")
-                .dataType(io.milvus.v2.common.DataType.Int16)
+
+        fieldTypes.add(FieldType.newBuilder()
+                .withName("int16")
+                .withDataType(DataType.Int16)
                 .build());
-        schemaV2.addField(AddFieldReq.builder()
-                .fieldName("int32")
-                .dataType(io.milvus.v2.common.DataType.Int32)
+
+        fieldTypes.add(FieldType.newBuilder()
+                .withName("int32")
+                .withDataType(DataType.Int32)
                 .build());
-        schemaV2.addField(AddFieldReq.builder()
-                .fieldName("float")
-                .dataType(io.milvus.v2.common.DataType.Float)
+
+        fieldTypes.add(FieldType.newBuilder()
+                .withName("float")
+                .withDataType(DataType.Float)
                 .build());
-        schemaV2.addField(AddFieldReq.builder()
-                .fieldName("double")
-                .dataType(io.milvus.v2.common.DataType.Double)
+
+        fieldTypes.add(FieldType.newBuilder()
+                .withName("double")
+                .withDataType(DataType.Double)
                 .build());
-        schemaV2.addField(AddFieldReq.builder()
-                .fieldName("varchar")
-                .dataType(io.milvus.v2.common.DataType.VarChar)
-                .maxLength(512)
+
+        fieldTypes.add(FieldType.newBuilder()
+                .withName("varchar")
+                .withDataType(DataType.VarChar)
+                .withMaxLength(512)
                 .build());
-        schemaV2.addField(AddFieldReq.builder()
-                .fieldName("json")
-                .dataType(io.milvus.v2.common.DataType.JSON)
+
+        fieldTypes.add(FieldType.newBuilder()
+                .withName("json")
+                .withDataType(DataType.JSON)
                 .build());
 
         // vector fields
-        schemaV2.addField(AddFieldReq.builder()
-                .fieldName("float_vector")
-                .dataType(io.milvus.v2.common.DataType.FloatVector)
-                .dimension(DIM)
+        fieldTypes.add(FieldType.newBuilder()
+                .withName("float_vector")
+                .withDataType(DataType.FloatVector)
+                .withDimension(DIM)
                 .build());
-        schemaV2.addField(AddFieldReq.builder()
-                .fieldName("binary_vector")
-                .dataType(io.milvus.v2.common.DataType.BinaryVector)
-                .dimension(DIM)
+        fieldTypes.add(FieldType.newBuilder()
+                .withName("binary_vector")
+                .withDataType(DataType.BinaryVector)
+                .withDimension(DIM)
                 .build());
-        schemaV2.addField(AddFieldReq.builder()
-                .fieldName("float16_vector")
-                .dataType(io.milvus.v2.common.DataType.Float16Vector)
-                .dimension(DIM)
+        fieldTypes.add(FieldType.newBuilder()
+                .withName("float16_vector")
+                .withDataType(DataType.Float16Vector)
+                .withDimension(DIM)
                 .build());
-        schemaV2.addField(AddFieldReq.builder()
-                .fieldName("sparse_vector")
-                .dataType(io.milvus.v2.common.DataType.SparseFloatVector)
+        fieldTypes.add(FieldType.newBuilder()
+                .withName("sparse_vector")
+                .withDataType(DataType.SparseFloatVector)
                 .build());
 
         // array fields
-        schemaV2.addField(AddFieldReq.builder()
-                .fieldName("array_bool")
-                .dataType(io.milvus.v2.common.DataType.Array)
-                .maxCapacity(ARRAY_CAPACITY)
-                .elementType(io.milvus.v2.common.DataType.Bool)
-                .build());
-        schemaV2.addField(AddFieldReq.builder()
-                .fieldName("array_int8")
-                .dataType(io.milvus.v2.common.DataType.Array)
-                .maxCapacity(ARRAY_CAPACITY)
-                .elementType(io.milvus.v2.common.DataType.Int8)
-                .build());
-        schemaV2.addField(AddFieldReq.builder()
-                .fieldName("array_int16")
-                .dataType(io.milvus.v2.common.DataType.Array)
-                .maxCapacity(ARRAY_CAPACITY)
-                .elementType(io.milvus.v2.common.DataType.Int16)
-                .build());
-        schemaV2.addField(AddFieldReq.builder()
-                .fieldName("array_int32")
-                .dataType(io.milvus.v2.common.DataType.Array)
-                .maxCapacity(ARRAY_CAPACITY)
-                .elementType(io.milvus.v2.common.DataType.Int32)
-                .build());
-        schemaV2.addField(AddFieldReq.builder()
-                .fieldName("array_int64")
-                .dataType(io.milvus.v2.common.DataType.Array)
-                .maxCapacity(ARRAY_CAPACITY)
-                .elementType(io.milvus.v2.common.DataType.Int64)
-                .build());
-        schemaV2.addField(AddFieldReq.builder()
-                .fieldName("array_varchar")
-                .dataType(io.milvus.v2.common.DataType.Array)
-                .maxCapacity(ARRAY_CAPACITY)
-                .elementType(io.milvus.v2.common.DataType.VarChar)
-                .maxLength(512)
-                .build());
-        schemaV2.addField(AddFieldReq.builder()
-                .fieldName("array_float")
-                .dataType(io.milvus.v2.common.DataType.Array)
-                .maxCapacity(ARRAY_CAPACITY)
-                .elementType(io.milvus.v2.common.DataType.Float)
-                .build());
-        schemaV2.addField(AddFieldReq.builder()
-                .fieldName("array_double")
-                .dataType(io.milvus.v2.common.DataType.Array)
-                .maxCapacity(ARRAY_CAPACITY)
-                .elementType(io.milvus.v2.common.DataType.Double)
+        fieldTypes.add(FieldType.newBuilder()
+                .withName("array_bool")
+                .withDataType(DataType.Array)
+                .withElementType(DataType.Bool)
+                .withMaxCapacity(ARRAY_CAPACITY)
                 .build());
 
-        return schemaV2;
+        fieldTypes.add(FieldType.newBuilder()
+                .withName("array_int8")
+                .withDataType(DataType.Array)
+                .withElementType(DataType.Int8)
+                .withMaxCapacity(ARRAY_CAPACITY)
+                .build());
+
+        fieldTypes.add(FieldType.newBuilder()
+                .withName("array_int16")
+                .withDataType(DataType.Array)
+                .withElementType(DataType.Int16)
+                .withMaxCapacity(ARRAY_CAPACITY)
+                .build());
+
+        fieldTypes.add(FieldType.newBuilder()
+                .withName("array_int32")
+                .withDataType(DataType.Array)
+                .withElementType(DataType.Int32)
+                .withMaxCapacity(ARRAY_CAPACITY)
+                .build());
+
+        fieldTypes.add(FieldType.newBuilder()
+                .withName("array_int64")
+                .withDataType(DataType.Array)
+                .withElementType(DataType.Int64)
+                .withMaxCapacity(ARRAY_CAPACITY)
+                .build());
+
+        fieldTypes.add(FieldType.newBuilder()
+                .withName("array_varchar")
+                .withDataType(DataType.Array)
+                .withElementType(DataType.VarChar)
+                .withMaxLength(512)
+                .withMaxCapacity(ARRAY_CAPACITY)
+                .build());
+
+        fieldTypes.add(FieldType.newBuilder()
+                .withName("array_float")
+                .withDataType(DataType.Array)
+                .withElementType(DataType.Float)
+                .withMaxCapacity(ARRAY_CAPACITY)
+                .build());
+
+        fieldTypes.add(FieldType.newBuilder()
+                .withName("array_double")
+                .withDataType(DataType.Array)
+                .withElementType(DataType.Double)
+                .withMaxCapacity(ARRAY_CAPACITY)
+                .build());
+
+        CollectionSchemaParam.Builder schemaBuilder = CollectionSchemaParam.newBuilder()
+                .withEnableDynamicField(true)
+                .withFieldTypes(fieldTypes);
+
+        return schemaBuilder.build();
     }
 
     private void checkMilvusClientIfExist() {

@@ -19,10 +19,10 @@
 
 package io.milvus.bulkwriter;
 
-import com.google.gson.JsonObject;
 import com.azure.storage.blob.models.BlobErrorCode;
 import com.azure.storage.blob.models.BlobStorageException;
 import com.google.common.collect.Lists;
+import com.google.gson.JsonObject;
 import io.milvus.bulkwriter.connect.AzureConnectParam;
 import io.milvus.bulkwriter.connect.S3ConnectParam;
 import io.milvus.bulkwriter.connect.StorageConnectParam;
@@ -42,9 +42,7 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.util.ArrayList;
-import java.util.HashMap;
 import java.util.List;
-import java.util.Map;
 
 public class RemoteBulkWriter extends LocalBulkWriter {
     private static final Logger logger = LoggerFactory.getLogger(RemoteBulkWriter.class);
@@ -170,11 +168,6 @@ public class RemoteBulkWriter extends LocalBulkWriter {
             }
 
             for (String filePath : fileList) {
-                String ext = getExtension(filePath);
-                if (!Lists.newArrayList(".parquet").contains(ext)) {
-                    continue;
-                }
-
                 String relativeFilePath = filePath.replace(super.getDataPath(), "");
                 String minioFilePath = getMinioFilePath(remotePath, relativeFilePath);
 
@@ -278,17 +271,5 @@ public class RemoteBulkWriter extends LocalBulkWriter {
         Path relative = Paths.get(relativeFilePath);
         Path joinedPath = remote.resolve(relative);
         return joinedPath.toString();
-    }
-
-    private static String getExtension(String filePath) {
-        Path path = Paths.get(filePath);
-        String fileName = path.getFileName().toString();
-        int dotIndex = fileName.lastIndexOf('.');
-
-        if (dotIndex == -1 || dotIndex == fileName.length() - 1) {
-            return "";
-        } else {
-            return fileName.substring(dotIndex);
-        }
     }
 }

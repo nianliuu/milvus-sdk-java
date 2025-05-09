@@ -106,7 +106,7 @@ public class UpsertTest extends BaseTest {
 
     @Test(description = "upsert collection", groups = {"Smoke"})
     public void simpleUpsert() {
-        String collection = CommonFunction.createSimpleCollection(128, null);
+        String collection = CommonFunction.createSimpleCollection(128, null,false);
         List<JsonObject> jsonObjects = CommonFunction.generateSimpleData(CommonData.numberEntities, CommonData.dim);
         milvusClientV2.insert(InsertReq.builder().collectionName(collection).data(jsonObjects).build());
         List<JsonObject> jsonObjectsNew = CommonFunction.generateSimpleData(10, CommonData.dim);
@@ -139,7 +139,7 @@ public class UpsertTest extends BaseTest {
         // query
         QueryResp query = milvusClientV2.query(QueryReq.builder()
                 .collectionName(collectionName)
-                .filter(CommonData.fieldInt32 + " == 1")
+                .filter(CommonData.fieldInt32 + " == 0")
                 .partitionNames(Lists.newArrayList(CommonData.defaultPartitionName))
                 .outputFields(Lists.newArrayList(CommonData.fieldInt64, CommonData.fieldInt32))
                 .consistencyLevel(ConsistencyLevel.STRONG).build());

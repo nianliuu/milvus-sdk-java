@@ -19,14 +19,25 @@
 
 package io.milvus.bulkwriter;
 
-import com.google.gson.*;
+import com.google.common.collect.Lists;
+import com.google.gson.JsonElement;
+import com.google.gson.JsonNull;
+import com.google.gson.JsonObject;
+import com.google.gson.JsonPrimitive;
 import io.milvus.bulkwriter.common.clientenum.BulkFileType;
 import io.milvus.bulkwriter.common.clientenum.TypeSize;
+import io.milvus.bulkwriter.common.utils.V2AdapterUtils;
+import io.milvus.bulkwriter.writer.CSVFileWriter;
+import io.milvus.bulkwriter.writer.FormatFileWriter;
+import io.milvus.bulkwriter.writer.JSONFileWriter;
+import io.milvus.bulkwriter.writer.ParquetFileWriter;
 import io.milvus.common.utils.ExceptionUtils;
-import io.milvus.grpc.*;
+import io.milvus.common.utils.Float16Utils;
+import io.milvus.grpc.FieldSchema;
 import io.milvus.param.ParamUtils;
-import io.milvus.param.collection.CollectionSchemaParam;
-import io.milvus.param.collection.FieldType;
+import io.milvus.v2.common.DataType;
+import io.milvus.v2.service.collection.request.CreateCollectionReq;
+import io.milvus.v2.utils.SchemaUtils;
 import org.apache.commons.collections4.CollectionUtils;
 import org.apache.commons.lang3.tuple.Pair;
 import org.slf4j.Logger;
@@ -34,91 +45,177 @@ import org.slf4j.LoggerFactory;
 
 import java.io.IOException;
 import java.nio.ByteBuffer;
+import java.nio.ByteOrder;
+import java.nio.file.Files;
+import java.nio.file.Paths;
 import java.util.*;
 import java.util.concurrent.locks.ReentrantLock;
 
 import static io.milvus.param.Constant.DYNAMIC_FIELD_NAME;
 
-public abstract class BulkWriter {
+public abstract class BulkWriter implements AutoCloseable {
     private static final Logger logger = LoggerFactory.getLogger(BulkWriter.class);
-    protected CollectionSchemaParam collectionSchema;
-    protected int chunkSize;
+    protected CreateCollectionReq.CollectionSchema collectionSchema;
+    protected long chunkSize;
+
     protected BulkFileType fileType;
+    protected String localPath;
+    protected String uuid;
+    protected int flushCount;
+    protected FormatFileWriter fileWriter;
+    protected final Map<String, Object> config;
 
-    protected int bufferSize;
-    protected int bufferRowCount;
-    protected int totalRowCount;
-    protected Buffer buffer;
-    protected ReentrantLock bufferLock;
+    protected long totalSize;
+    protected long totalRowCount;
+    protected ReentrantLock appendLock;
+    protected ReentrantLock fileWriteLock;
 
-    protected BulkWriter(CollectionSchemaParam collectionSchema, int chunkSize, BulkFileType fileType) {
+    protected boolean firstWrite;
+
+    protected BulkWriter(CreateCollectionReq.CollectionSchema collectionSchema, long chunkSize, BulkFileType fileType, String localPath, Map<String, Object> config) throws IOException {
         this.collectionSchema = collectionSchema;
         this.chunkSize = chunkSize;
         this.fileType = fileType;
+        this.localPath = localPath;
+        this.uuid = UUID.randomUUID().toString();
+        this.config = config;
 
-        if (CollectionUtils.isEmpty(collectionSchema.getFieldTypes())) {
+        if (CollectionUtils.isEmpty(collectionSchema.getFieldSchemaList())) {
             ExceptionUtils.throwUnExpectedException("collection schema fields list is empty");
         }
 
-        if (!hasPrimaryField(collectionSchema.getFieldTypes())) {
+        if (!hasPrimaryField(collectionSchema.getFieldSchemaList())) {
             ExceptionUtils.throwUnExpectedException("primary field is null");
         }
-        bufferLock = new ReentrantLock();
-        buffer = null;
-        this.newBuffer();
+        appendLock = new ReentrantLock();
+
+        this.makeDir();
+        fileWriteLock = new ReentrantLock();
+        fileWriter = null;
+        this.newFileWriter();
+
+        firstWrite = true;
     }
 
-    protected Integer getBufferSize() {
-        return bufferSize;
+    protected Long getTotalSize() {
+        return totalSize;
     }
 
-    public Integer getBufferRowCount() {
-        return bufferRowCount;
-    }
-
-    public Integer getTotalRowCount() {
+    public Long getTotalRowCount() {
         return totalRowCount;
     }
 
-    protected Integer getChunkSize() {
+    protected Long getChunkSize() {
         return chunkSize;
     }
 
-    protected Buffer newBuffer() {
-        Buffer oldBuffer = buffer;
+    protected FormatFileWriter getFileWriter() {
+        return fileWriter;
+    }
 
-        bufferLock.lock();
-        this.buffer = new Buffer(collectionSchema, fileType);
-        bufferLock.unlock();
+    protected FormatFileWriter newFileWriter() throws IOException {
+        FormatFileWriter oldFileWriter = fileWriter;
 
-        return oldBuffer;
+        fileWriteLock.lock();
+        createWriterByType();
+        fileWriteLock.unlock();
+        return oldFileWriter;
+    }
+
+    private void createWriterByType() throws IOException {
+        flushCount += 1;
+        java.nio.file.Path path = Paths.get(localPath);
+        java.nio.file.Path filePathPrefix = path.resolve(String.valueOf(flushCount));
+
+        switch (fileType) {
+            case PARQUET:
+                this.fileWriter =  new ParquetFileWriter(collectionSchema, filePathPrefix.toString());
+                break;
+            case JSON:
+                this.fileWriter = new JSONFileWriter(collectionSchema, filePathPrefix.toString());
+                break;
+            case CSV:
+                this.fileWriter = new CSVFileWriter(collectionSchema, filePathPrefix.toString(), config);
+                break;
+            default:
+                ExceptionUtils.throwUnExpectedException("Unsupported file type: " + fileType);
+        }
+    }
+
+    private void makeDir() throws IOException {
+        java.nio.file.Path path = Paths.get(localPath);
+        createDirIfNotExist(path);
+
+        java.nio.file.Path fullPath = path.resolve(uuid);
+        createDirIfNotExist(fullPath);
+        this.localPath = fullPath.toString();
+    }
+
+    private void createDirIfNotExist(java.nio.file.Path path) throws IOException {
+        try {
+            Files.createDirectories(path);
+            logger.info("Data path created: {}", path);
+        } catch (IOException e) {
+            logger.error("Data Path create failed: {}", path);
+            throw e;
+        }
     }
 
     public void appendRow(JsonObject row) throws IOException, InterruptedException {
         Map<String, Object> rowValues = verifyRow(row);
+        List<String> filePaths = Lists.newArrayList();
 
-        bufferLock.lock();
-        buffer.appendRow(rowValues);
-        bufferLock.unlock();
+        appendLock.lock();
+        fileWriter.appendRow(rowValues, firstWrite);
+        firstWrite = false;
+        if (getTotalSize() > getChunkSize()) {
+            filePaths = commitIfFileReady(true);
+        }
+        appendLock.unlock();
+
+        if (CollectionUtils.isNotEmpty(filePaths)) {
+            callBackIfCommitReady(filePaths);
+        }
     }
 
-    protected void commit(boolean async) throws InterruptedException {
-        bufferLock.lock();
-        bufferSize = 0;
-        bufferRowCount = 0;
-        bufferLock.unlock();
+
+    protected abstract List<String> commitIfFileReady(boolean createNewFile) throws IOException;
+
+    protected abstract void callBackIfCommitReady(List<String> filePaths) throws IOException, InterruptedException;
+
+
+    protected void commit() {
+        appendLock.lock();
+        totalSize = 0;
+        totalRowCount = 0;
+        appendLock.unlock();
     }
 
     protected String getDataPath() {
         return "";
     }
 
-    private Map<String, Object> verifyRow(JsonObject row) {
+    private JsonElement setDefaultValue(Object defaultValue, JsonObject row, String fieldName) {
+        if (defaultValue instanceof Boolean) {
+            row.addProperty(fieldName, (Boolean) defaultValue);
+            return new JsonPrimitive((Boolean) defaultValue);
+        } else if (defaultValue instanceof String) {
+            row.addProperty(fieldName, (String) defaultValue);
+            return new JsonPrimitive((String) defaultValue);
+        } else {
+            row.addProperty(fieldName, (Number) defaultValue);
+            return new JsonPrimitive((Number) defaultValue);
+        }
+    }
+
+    protected Map<String, Object> verifyRow(JsonObject row) {
         int rowSize = 0;
         Map<String, Object> rowValues = new HashMap<>();
-        for (FieldType fieldType : collectionSchema.getFieldTypes()) {
-            String fieldName = fieldType.getName();
-            if (fieldType.isPrimaryKey() && fieldType.isAutoID()) {
+        List<String> outputFieldNames = V2AdapterUtils.getOutputFieldNames(collectionSchema);
+
+        for (CreateCollectionReq.FieldSchema field : collectionSchema.getFieldSchemaList()) {
+            String fieldName = field.getName();
+            if (field.getIsPrimaryKey() && field.getAutoID()) {
                 if (row.has(fieldName)) {
                     String msg = String.format("The primary key field '%s' is auto-id, no need to provide", fieldName);
                     ExceptionUtils.throwUnExpectedException(msg);
@@ -127,43 +224,91 @@ public abstract class BulkWriter {
                 }
             }
 
-            if (!row.has(fieldName)) {
-                String msg = String.format("The field '%s' is missed in the row", fieldName);
-                ExceptionUtils.throwUnExpectedException(msg);
-            }
-
             JsonElement obj = row.get(fieldName);
-            if (obj == null || obj.isJsonNull()) {
-                String msg = String.format("Illegal value for field '%s', value is null", fieldName);
-                ExceptionUtils.throwUnExpectedException(msg);
+            if (obj == null ) {
+                obj = JsonNull.INSTANCE;
+            }
+            if (outputFieldNames.contains(fieldName)) {
+                if (obj instanceof JsonNull) {
+                    continue;
+                } else {
+                    String msg = String.format("The field '%s'  is function output, no need to provide", fieldName);
+                    ExceptionUtils.throwUnExpectedException(msg);
+                }
             }
 
-            DataType dataType = fieldType.getDataType();
+            // deal with null (None) according to the Applicable rules in this page:
+            // https://milvus.io/docs/nullable-and-default.md#Nullable--Default
+            Object defaultValue = field.getDefaultValue();
+            if (field.getIsNullable()) {
+                if (defaultValue != null) {
+                    // case 1: nullable is true, default_value is not null, user_input is null
+                    // replace the value by default value
+                    if (obj instanceof JsonNull) {
+                        obj = setDefaultValue(defaultValue, row, fieldName);
+                    }
+
+                    // case 2: nullable is true, default_value is not null, user_input is not null
+                    // check and set the value
+                } else {
+                    // case 3: nullable is true, default_value is null, user_input is null
+                    // do nothing
+                    if (obj instanceof JsonNull) {
+                        row.add(fieldName, JsonNull.INSTANCE);
+                    }
+
+                    // case 4: nullable is true, default_value is null, user_input is not null
+                    // check and set the value
+                }
+            } else {
+                if (defaultValue != null) {
+                    // case 5: nullable is false, default_value is not null, user_input is null
+                    // replace the value by default value
+                    if (obj instanceof JsonNull) {
+                        obj = setDefaultValue(defaultValue, row, fieldName);
+                    }
+
+                    // case 6: nullable is false, default_value is not null, user_input is not null
+                    // check and set the value
+                } else {
+                    // case 7: nullable is false, default_value is null, user_input is null
+                    // raise an exception
+                    if (obj instanceof JsonNull) {
+                        String msg = String.format("The field '%s' is not nullable, not allow null value", fieldName);
+                        ExceptionUtils.throwUnExpectedException(msg);
+                    }
+
+                    // case 8: nullable is false, default_value is null, user_input is not null
+                    // check and set the value
+                }
+            }
+
+            DataType dataType = field.getDataType();
             switch (dataType) {
                 case BinaryVector:
                 case FloatVector:
                 case Float16Vector:
                 case BFloat16Vector:
                 case SparseFloatVector: {
-                    Pair<Object, Integer> objectAndSize = verifyVector(obj, fieldType);
+                    Pair<Object, Integer> objectAndSize = verifyVector(obj, field);
                     rowValues.put(fieldName, objectAndSize.getLeft());
                     rowSize += objectAndSize.getRight();
                     break;
                 }
                 case VarChar: {
-                    Pair<Object, Integer> objectAndSize = verifyVarchar(obj, fieldType);
+                    Pair<Object, Integer> objectAndSize = verifyVarchar(obj, field);
                     rowValues.put(fieldName, objectAndSize.getLeft());
                     rowSize += objectAndSize.getRight();
                     break;
                 }
                 case JSON: {
-                    Pair<Object, Integer> objectAndSize = verifyJSON(obj, fieldType);
+                    Pair<Object, Integer> objectAndSize = verifyJSON(obj, field);
                     rowValues.put(fieldName, objectAndSize.getLeft());
                     rowSize += objectAndSize.getRight();
                     break;
                 }
                 case Array: {
-                    Pair<Object, Integer> objectAndSize = verifyArray(obj, fieldType);
+                    Pair<Object, Integer> objectAndSize = verifyArray(obj, field);
                     rowValues.put(fieldName, objectAndSize.getLeft());
                     rowSize += objectAndSize.getRight();
                     break;
@@ -175,7 +320,7 @@ public abstract class BulkWriter {
                 case Int64:
                 case Float:
                 case Double:
-                    Pair<Object, Integer> objectAndSize = verifyScalar(obj, fieldType);
+                    Pair<Object, Integer> objectAndSize = verifyScalar(obj, field);
                     rowValues.put(fieldName, objectAndSize.getLeft());
                     rowSize += objectAndSize.getRight();
                     break;
@@ -207,18 +352,18 @@ public abstract class BulkWriter {
             rowSize += strValues.length();
         }
 
-        bufferLock.lock();
-        bufferSize += rowSize;
-        bufferRowCount += 1;
+        appendLock.lock();
+        totalSize += rowSize;
         totalRowCount += 1;
-        bufferLock.unlock();
+        appendLock.unlock();
 
         return rowValues;
     }
 
-    private Pair<Object, Integer> verifyVector(JsonElement object, FieldType fieldType) {
-        Object vector = ParamUtils.checkFieldValue(fieldType, object);
-        DataType dataType = fieldType.getDataType();
+    private Pair<Object, Integer> verifyVector(JsonElement object, CreateCollectionReq.FieldSchema field) {
+        FieldSchema grpcField = SchemaUtils.convertToGrpcFieldSchema(field);
+        Object vector = ParamUtils.checkFieldValue(ParamUtils.ConvertField(grpcField), object);
+        io.milvus.v2.common.DataType dataType = field.getDataType();
         switch (dataType) {
             case FloatVector:
                 return Pair.of(vector, ((List<?>) vector).size() * 4);
@@ -226,6 +371,15 @@ public abstract class BulkWriter {
                 return Pair.of(vector, ((ByteBuffer)vector).limit());
             case Float16Vector:
             case BFloat16Vector:
+                // for JSON and CSV, float16/bfloat16 vector is parsed as float values in text
+                if (this.fileType == BulkFileType.CSV || this.fileType == BulkFileType.JSON) {
+                    ByteBuffer bv = (ByteBuffer)vector;
+                    bv.order(ByteOrder.LITTLE_ENDIAN); // ensure LITTLE_ENDIAN
+                    List<Float> v = (dataType == DataType.Float16Vector) ?
+                            Float16Utils.fp16BufferToVector(bv) : Float16Utils.bf16BufferToVector(bv);
+                    return Pair.of(v, v.size() * 4);
+                }
+                // for PARQUET, float16/bfloat16 vector is parsed as binary
                 return Pair.of(vector, ((ByteBuffer)vector).limit() * 2);
             case SparseFloatVector:
                 return Pair.of(vector, ((SortedMap<Long, Float>)vector).size() * 12);
@@ -235,21 +389,34 @@ public abstract class BulkWriter {
         return null;
     }
 
-    private Pair<Object, Integer> verifyVarchar(JsonElement object, FieldType fieldType) {
-        Object varchar = ParamUtils.checkFieldValue(fieldType, object);
+    private Pair<Object, Integer> verifyVarchar(JsonElement object, CreateCollectionReq.FieldSchema field) {
+        if (object.isJsonNull()) {
+            return Pair.of(null, 0);
+        }
+
+        FieldSchema grpcField = SchemaUtils.convertToGrpcFieldSchema(field);
+        Object varchar = ParamUtils.checkFieldValue(ParamUtils.ConvertField(grpcField), object);
         return Pair.of(varchar, String.valueOf(varchar).length());
     }
 
-    private Pair<Object, Integer> verifyJSON(JsonElement object, FieldType fieldType) {
+    private Pair<Object, Integer> verifyJSON(JsonElement object, CreateCollectionReq.FieldSchema field) {
+        if (object.isJsonNull()) {
+            return Pair.of(null, 0);
+        }
+
         String str = object.toString();
         return Pair.of(str, str.length());
     }
 
-    private Pair<Object, Integer> verifyArray(JsonElement object, FieldType fieldType) {
-        Object array = ParamUtils.checkFieldValue(fieldType, object);
+    private Pair<Object, Integer> verifyArray(JsonElement object, CreateCollectionReq.FieldSchema field) {
+        FieldSchema grpcField = SchemaUtils.convertToGrpcFieldSchema(field);
+        Object array = ParamUtils.checkFieldValue(ParamUtils.ConvertField(grpcField), object);
+        if (array == null) {
+            return Pair.of(null, 0);
+        }
 
         int rowSize = 0;
-        DataType elementType = fieldType.getElementType();
+        DataType elementType = field.getElementType();
         if (TypeSize.contains(elementType)) {
             rowSize = TypeSize.getSize(elementType) * ((List<?>)array).size();
         } else if (elementType == DataType.VarChar) {
@@ -257,22 +424,26 @@ public abstract class BulkWriter {
                 rowSize += str.length();
             }
         } else {
-            String msg = String.format("Unsupported element type for array field '%s'", fieldType.getName());
+            String msg = String.format("Unsupported element type for array field '%s'", field.getName());
             ExceptionUtils.throwUnExpectedException(msg);
         }
 
         return Pair.of(array, rowSize);
     }
 
-    private Pair<Object, Integer> verifyScalar(JsonElement object, FieldType fieldType) {
+    private Pair<Object, Integer> verifyScalar(JsonElement object, CreateCollectionReq.FieldSchema field) {
+        if (object.isJsonNull()) {
+            return Pair.of(null, 0);
+        }
+
         if (!object.isJsonPrimitive()) {
-            String msg = String.format("Unsupported value type for field '%s'", fieldType.getName());
+            String msg = String.format("Unsupported value type for field '%s'", field.getName());
             ExceptionUtils.throwUnExpectedException(msg);
         }
 
         JsonPrimitive value = object.getAsJsonPrimitive();
-        DataType dataType = fieldType.getDataType();
-        String fieldName = fieldType.getName();
+        DataType dataType = field.getDataType();
+        String fieldName = field.getName();
         if (dataType == DataType.Bool) {
             if (!value.isBoolean()) {
                 String msg = String.format("Unsupported value type for field '%s', value is not boolean", fieldName);
@@ -305,8 +476,8 @@ public abstract class BulkWriter {
         return Pair.of(null, null);
     }
 
-    private boolean hasPrimaryField(List<FieldType> fieldTypes) {
-        Optional<FieldType> primaryKeyField = fieldTypes.stream().filter(FieldType::isPrimaryKey).findFirst();
+    private boolean hasPrimaryField(List<CreateCollectionReq.FieldSchema> fields) {
+        Optional<CreateCollectionReq.FieldSchema> primaryKeyField = fields.stream().filter(CreateCollectionReq.FieldSchema::getIsPrimaryKey).findFirst();
         return primaryKeyField.isPresent();
     }
 }

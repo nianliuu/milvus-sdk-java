@@ -61,6 +61,7 @@ public class ParamUtils {
         typeErrMsg.put(DataType.Float, "Type mismatch for field '%s': Float field value type must be Float.");
         typeErrMsg.put(DataType.Double, "Type mismatch for field '%s': Double field value type must be Double.");
         typeErrMsg.put(DataType.String, "Type mismatch for field '%s': String field value type must be String."); // actually String type is useless
+        typeErrMsg.put(DataType.JSON, "Type mismatch for field '%s': JSON field value type must be JSON, current type: %s.");
         typeErrMsg.put(DataType.VarChar, "Type mismatch for field '%s': VarChar field value type must be String, and the string length must shorter than max_length.");
         typeErrMsg.put(DataType.Array, "Type mismatch for field '%s': Array field value type must be List<Object>, each object type must be element_type, and the array length must be shorter than max_capacity.");
         typeErrMsg.put(DataType.FloatVector, "Type mismatch for field '%s': Float vector field's value type must be List<Float>.");
@@ -284,7 +285,7 @@ public class ParamUtils {
                         continue;
                     }
                     if (!(value instanceof JsonElement)) {
-                        throw new ParamException(String.format(errMsgs.get(dataType), fieldSchema.getName()));
+                        throw new ParamException(String.format(errMsgs.get(dataType), fieldSchema.getName(), value.getClass().getName()));
                     }
                 }
                 break;
@@ -1045,8 +1046,9 @@ public class ParamUtils {
         // set ranker
         BaseRanker ranker = requestParam.getRanker();
         Map<String, String> props = ranker.getProperties();
-        props.put("limit", String.format("%d", requestParam.getTopK()));
-        props.put("round_decimal", String.format("%d", requestParam.getRoundDecimal()));
+        props.put(Constant.LIMIT, String.format("%d", requestParam.getTopK()));
+        props.put(Constant.ROUND_DECIMAL, String.format("%d", requestParam.getRoundDecimal()));
+        props.put(Constant.OFFSET, String.format("%d", requestParam.getOffset()));
         List<KeyValuePair> propertiesList = ParamUtils.AssembleKvPair(props);
         if (CollectionUtils.isNotEmpty(propertiesList)) {
             propertiesList.forEach(builder::addRankParams);
@@ -1327,40 +1329,40 @@ public class ParamUtils {
             case UNRECOGNIZED:
                 throw new ParamException("Cannot support this dataType:" + dataType);
             case Int64: {
-                List<Long> longs = objects.stream().map(p -> (Long) p).collect(Collectors.toList());
+                List<Long> longs = objects.stream().map(p -> (p == null) ? null : (Long) p).collect(Collectors.toList());
                 LongArray longArray = LongArray.newBuilder().addAllData(longs).build();
                 return ScalarField.newBuilder().setLongData(longArray).build();
             }
             case Int32:
             case Int16:
             case Int8: {
-                List<Integer> integers = objects.stream().map(p -> p instanceof Short ? ((Short) p).intValue() : (Integer) p).collect(Collectors.toList());
+                List<Integer> integers = objects.stream().map(p -> (p == null) ? null : (p instanceof Short ? ((Short) p).intValue() : (Integer) p)).collect(Collectors.toList());
                 IntArray intArray = IntArray.newBuilder().addAllData(integers).build();
                 return ScalarField.newBuilder().setIntData(intArray).build();
             }
             case Bool: {
-                List<Boolean> booleans = objects.stream().map(p -> (Boolean) p).collect(Collectors.toList());
+                List<Boolean> booleans = objects.stream().map(p -> (p == null) ? null : (Boolean) p).collect(Collectors.toList());
                 BoolArray boolArray = BoolArray.newBuilder().addAllData(booleans).build();
                 return ScalarField.newBuilder().setBoolData(boolArray).build();
             }
             case Float: {
-                List<Float> floats = objects.stream().map(p -> (Float) p).collect(Collectors.toList());
+                List<Float> floats = objects.stream().map(p -> (p == null) ? null : (Float) p).collect(Collectors.toList());
                 FloatArray floatArray = FloatArray.newBuilder().addAllData(floats).build();
                 return ScalarField.newBuilder().setFloatData(floatArray).build();
             }
             case Double: {
-                List<Double> doubles = objects.stream().map(p -> (Double) p).collect(Collectors.toList());
+                List<Double> doubles = objects.stream().map(p -> (p == null) ? null : (Double) p).collect(Collectors.toList());
                 DoubleArray doubleArray = DoubleArray.newBuilder().addAllData(doubles).build();
                 return ScalarField.newBuilder().setDoubleData(doubleArray).build();
             }
             case String:
             case VarChar: {
-                List<String> strings = objects.stream().map(p -> (String) p).collect(Collectors.toList());
+                List<String> strings = objects.stream().map(p -> (p == null) ? null : (String) p).collect(Collectors.toList());
                 StringArray stringArray = StringArray.newBuilder().addAllData(strings).build();
                 return ScalarField.newBuilder().setStringData(stringArray).build();
             }
             case JSON: {
-                List<ByteString> byteStrings = objects.stream().map(p -> ByteString.copyFromUtf8(p.toString()))
+                List<ByteString> byteStrings = objects.stream().map(p -> (p == null) ? null : ByteString.copyFromUtf8(p.toString()))
                         .collect(Collectors.toList());
                 JSONArray jsonArray = JSONArray.newBuilder().addAllData(byteStrings).build();
                 return ScalarField.newBuilder().setJsonData(jsonArray).build();

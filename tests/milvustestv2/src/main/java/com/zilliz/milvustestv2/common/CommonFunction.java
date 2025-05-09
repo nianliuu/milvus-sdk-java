@@ -8,6 +8,15 @@ import com.zilliz.milvustestv2.utils.GenerateUtil;
 
 import com.zilliz.milvustestv2.utils.JsonObjectUtil;
 import com.zilliz.milvustestv2.utils.MathUtil;
+import com.zilliz.milvustestv2.utils.PropertyFilesUtil;
+import io.milvus.bulkwriter.LocalBulkWriter;
+import io.milvus.bulkwriter.LocalBulkWriterParam;
+import io.milvus.bulkwriter.RemoteBulkWriter;
+import io.milvus.bulkwriter.RemoteBulkWriterParam;
+import io.milvus.bulkwriter.common.clientenum.BulkFileType;
+import io.milvus.bulkwriter.common.clientenum.CloudStorage;
+import io.milvus.bulkwriter.connect.S3ConnectParam;
+import io.milvus.bulkwriter.connect.StorageConnectParam;
 import io.milvus.common.utils.Float16Utils;
 import io.milvus.v2.common.ConsistencyLevel;
 import io.milvus.v2.common.DataType;
@@ -25,13 +34,23 @@ import io.milvus.v2.service.vector.request.SearchReq;
 import io.milvus.v2.service.vector.request.data.*;
 import io.milvus.v2.service.vector.response.InsertResp;
 import io.milvus.v2.service.vector.response.SearchResp;
+import io.minio.BucketExistsArgs;
+import io.minio.MakeBucketArgs;
+import io.minio.MinioClient;
+import io.minio.UploadObjectArgs;
+import io.minio.errors.*;
 import lombok.NonNull;
 import lombok.extern.slf4j.Slf4j;
 
 import javax.annotation.Nullable;
+import java.io.IOException;
 import java.nio.ByteBuffer;
+import java.security.InvalidKeyException;
+import java.security.NoSuchAlgorithmException;
 import java.util.*;
 import java.util.stream.Collectors;
+
+import static com.zilliz.milvustestv2.common.BaseTest.milvusClientV2;
 
 /**
  * @Author yongpeng.li
@@ -39,6 +58,107 @@ import java.util.stream.Collectors;
  */
 @Slf4j
 public class CommonFunction {
+    /**
+     * 提供Collection Schema
+     *
+     * @param dim        维度
+     * @param vectorType 向量类型
+     * @return CollectionSchema
+     */
+    public static CreateCollectionReq.CollectionSchema providerCollectionSchema(int dim, DataType vectorType) {
+        CreateCollectionReq.FieldSchema fieldInt64 = CreateCollectionReq.FieldSchema.builder()
+                .autoID(false)
+                .dataType(io.milvus.v2.common.DataType.Int64)
+                .isPrimaryKey(true)
+                .name(CommonData.fieldInt64)
+                .build();
+        CreateCollectionReq.FieldSchema fieldInt32 = CreateCollectionReq.FieldSchema.builder()
+                .dataType(DataType.Int32)
+                .name(CommonData.fieldInt32)
+                .isPrimaryKey(false)
+                .build();
+        CreateCollectionReq.FieldSchema fieldInt16 = CreateCollectionReq.FieldSchema.builder()
+                .dataType(DataType.Int16)
+                .name(CommonData.fieldInt16)
+                .isPrimaryKey(false)
+                .build();
+        CreateCollectionReq.FieldSchema fieldInt8 = CreateCollectionReq.FieldSchema.builder()
+                .dataType(DataType.Int8)
+                .name(CommonData.fieldInt8)
+                .isPrimaryKey(false)
+                .build();
+        CreateCollectionReq.FieldSchema fieldDouble = CreateCollectionReq.FieldSchema.builder()
+                .dataType(DataType.Double)
+                .name(CommonData.fieldDouble)
+                .isPrimaryKey(false)
+                .build();
+        CreateCollectionReq.FieldSchema fieldArray = CreateCollectionReq.FieldSchema.builder()
+                .dataType(DataType.Array)
+                .name(CommonData.fieldArray)
+                .elementType(DataType.Int64)
+                .maxCapacity(100)
+                .isPrimaryKey(false)
+                .build();
+        CreateCollectionReq.FieldSchema fieldBool = CreateCollectionReq.FieldSchema.builder()
+                .dataType(DataType.Bool)
+                .name(CommonData.fieldBool)
+                .isPrimaryKey(false)
+                .build();
+        CreateCollectionReq.FieldSchema fieldVarchar = CreateCollectionReq.FieldSchema.builder()
+                .dataType(DataType.VarChar)
+                .name(CommonData.fieldVarchar)
+                .isPrimaryKey(false)
+                .maxLength(100)
+                .build();
+        CreateCollectionReq.FieldSchema fieldFloat = CreateCollectionReq.FieldSchema.builder()
+                .dataType(DataType.Float)
+                .name(CommonData.fieldFloat)
+                .isPrimaryKey(false)
+                .build();
+        CreateCollectionReq.FieldSchema fieldJson = CreateCollectionReq.FieldSchema.builder()
+                .dataType(DataType.JSON)
+                .name(CommonData.fieldJson)
+                .isPrimaryKey(false)
+                .build();
+        CreateCollectionReq.FieldSchema fieldVector = CreateCollectionReq.FieldSchema.builder()
+                .dataType(vectorType)
+                .isPrimaryKey(false)
+                .build();
+        if (vectorType == DataType.FloatVector) {
+            fieldVector.setDimension(dim);
+            fieldVector.setName(CommonData.fieldFloatVector);
+        }
+        if (vectorType == DataType.BinaryVector) {
+            fieldVector.setDimension(dim);
+            fieldVector.setName(CommonData.fieldBinaryVector);
+        }
+        if (vectorType == DataType.Float16Vector) {
+            fieldVector.setDimension(dim);
+            fieldVector.setName(CommonData.fieldFloat16Vector);
+        }
+        if (vectorType == DataType.BFloat16Vector) {
+            fieldVector.setDimension(dim);
+            fieldVector.setName(CommonData.fieldBF16Vector);
+        }
+        if (vectorType == DataType.SparseFloatVector) {
+            fieldVector.setName(CommonData.fieldSparseVector);
+        }
+        List<CreateCollectionReq.FieldSchema> fieldSchemaList = new ArrayList<>();
+        fieldSchemaList.add(fieldInt64);
+        fieldSchemaList.add(fieldInt32);
+        fieldSchemaList.add(fieldInt16);
+        fieldSchemaList.add(fieldInt8);
+        fieldSchemaList.add(fieldFloat);
+        fieldSchemaList.add(fieldDouble);
+        fieldSchemaList.add(fieldArray);
+        fieldSchemaList.add(fieldBool);
+        fieldSchemaList.add(fieldJson);
+        fieldSchemaList.add(fieldVarchar);
+        fieldSchemaList.add(fieldVector);
+        return CreateCollectionReq.CollectionSchema.builder()
+                .fieldSchemaList(fieldSchemaList)
+                .build();
+    }
 
     /**
      * 创建DataType vectorType类型向量的collection
@@ -82,7 +202,7 @@ public class CommonFunction {
                 .dataType(DataType.Array)
                 .name(CommonData.fieldArray)
                 .elementType(DataType.Int64)
-                .maxCapacity(1000)
+                .maxCapacity(100)
                 .isPrimaryKey(false)
                 .build();
         CreateCollectionReq.FieldSchema fieldBool = CreateCollectionReq.FieldSchema.builder()
@@ -94,7 +214,7 @@ public class CommonFunction {
                 .dataType(DataType.VarChar)
                 .name(CommonData.fieldVarchar)
                 .isPrimaryKey(false)
-                .maxLength(1000)
+                .maxLength(100)
                 .build();
         CreateCollectionReq.FieldSchema fieldFloat = CreateCollectionReq.FieldSchema.builder()
                 .dataType(DataType.Float)
@@ -151,8 +271,116 @@ public class CommonFunction {
                 .description("collection desc")
                 .numShards(1)
                 .build();
-        BaseTest.milvusClientV2.createCollection(createCollectionReq);
+        milvusClientV2.createCollection(createCollectionReq);
         log.info("create collection:" + collectionName);
+        return collectionName;
+    }
+    public static String createNewCollectionWithDynamic(int dim, String collectionName, DataType vectorType) {
+        if (collectionName == null || collectionName.equals("")) {
+            collectionName = "Collection_" + GenerateUtil.getRandomString(10);
+        }
+        CreateCollectionReq.FieldSchema fieldInt64 = CreateCollectionReq.FieldSchema.builder()
+                .autoID(false)
+                .dataType(io.milvus.v2.common.DataType.Int64)
+                .isPrimaryKey(true)
+                .name(CommonData.fieldInt64)
+                .build();
+        CreateCollectionReq.FieldSchema fieldInt32 = CreateCollectionReq.FieldSchema.builder()
+                .dataType(DataType.Int32)
+                .name(CommonData.fieldInt32)
+                .isPrimaryKey(false)
+                .build();
+        CreateCollectionReq.FieldSchema fieldInt16 = CreateCollectionReq.FieldSchema.builder()
+                .dataType(DataType.Int16)
+                .name(CommonData.fieldInt16)
+                .isPrimaryKey(false)
+                .build();
+        CreateCollectionReq.FieldSchema fieldInt8 = CreateCollectionReq.FieldSchema.builder()
+                .dataType(DataType.Int8)
+                .name(CommonData.fieldInt8)
+                .isPrimaryKey(false)
+                .build();
+        CreateCollectionReq.FieldSchema fieldDouble = CreateCollectionReq.FieldSchema.builder()
+                .dataType(DataType.Double)
+                .name(CommonData.fieldDouble)
+                .isPrimaryKey(false)
+                .build();
+        CreateCollectionReq.FieldSchema fieldArray = CreateCollectionReq.FieldSchema.builder()
+                .dataType(DataType.Array)
+                .name(CommonData.fieldArray)
+                .elementType(DataType.Int64)
+                .maxCapacity(100)
+                .isPrimaryKey(false)
+                .build();
+        CreateCollectionReq.FieldSchema fieldBool = CreateCollectionReq.FieldSchema.builder()
+                .dataType(DataType.Bool)
+                .name(CommonData.fieldBool)
+                .isPrimaryKey(false)
+                .build();
+        CreateCollectionReq.FieldSchema fieldVarchar = CreateCollectionReq.FieldSchema.builder()
+                .dataType(DataType.VarChar)
+                .name(CommonData.fieldVarchar)
+                .isPrimaryKey(false)
+                .maxLength(100)
+                .build();
+        CreateCollectionReq.FieldSchema fieldFloat = CreateCollectionReq.FieldSchema.builder()
+                .dataType(DataType.Float)
+                .name(CommonData.fieldFloat)
+                .isPrimaryKey(false)
+                .build();
+        CreateCollectionReq.FieldSchema fieldJson = CreateCollectionReq.FieldSchema.builder()
+                .dataType(DataType.JSON)
+                .name(CommonData.fieldJson)
+                .isPrimaryKey(false)
+                .build();
+        CreateCollectionReq.FieldSchema fieldVector = CreateCollectionReq.FieldSchema.builder()
+                .dataType(vectorType)
+                .isPrimaryKey(false)
+                .build();
+        if (vectorType == DataType.FloatVector) {
+            fieldVector.setDimension(dim);
+            fieldVector.setName(CommonData.fieldFloatVector);
+        }
+        if (vectorType == DataType.BinaryVector) {
+            fieldVector.setDimension(dim);
+            fieldVector.setName(CommonData.fieldBinaryVector);
+        }
+        if (vectorType == DataType.Float16Vector) {
+            fieldVector.setDimension(dim);
+            fieldVector.setName(CommonData.fieldFloat16Vector);
+        }
+        if (vectorType == DataType.BFloat16Vector) {
+            fieldVector.setDimension(dim);
+            fieldVector.setName(CommonData.fieldBF16Vector);
+        }
+        if (vectorType == DataType.SparseFloatVector) {
+            fieldVector.setName(CommonData.fieldSparseVector);
+        }
+        List<CreateCollectionReq.FieldSchema> fieldSchemaList = new ArrayList<>();
+        fieldSchemaList.add(fieldInt64);
+        fieldSchemaList.add(fieldInt32);
+        fieldSchemaList.add(fieldInt16);
+        fieldSchemaList.add(fieldInt8);
+        fieldSchemaList.add(fieldFloat);
+        fieldSchemaList.add(fieldDouble);
+        fieldSchemaList.add(fieldArray);
+        fieldSchemaList.add(fieldBool);
+        fieldSchemaList.add(fieldJson);
+        fieldSchemaList.add(fieldVarchar);
+        fieldSchemaList.add(fieldVector);
+        CreateCollectionReq.CollectionSchema collectionSchema = CreateCollectionReq.CollectionSchema.builder()
+                .fieldSchemaList(fieldSchemaList)
+                .enableDynamicField(true)
+                .build();
+        CreateCollectionReq createCollectionReq = CreateCollectionReq.builder()
+                .collectionSchema(collectionSchema)
+                .collectionName(collectionName)
+                .enableDynamicField(true)
+                .description("collection desc")
+                .numShards(1)
+                .build();
+        milvusClientV2.createCollection(createCollectionReq);
+        log.info("create collection with dynamic field:" + collectionName);
         return collectionName;
     }
 
@@ -276,7 +504,7 @@ public class CommonFunction {
                 .description("collection desc")
                 .numShards(1)
                 .build();
-        BaseTest.milvusClientV2.createCollection(createCollectionReq);
+        milvusClientV2.createCollection(createCollectionReq);
         log.info("create collection:" + collectionName);
         return collectionName;
     }
@@ -399,7 +627,7 @@ public class CommonFunction {
                 .description("collection desc")
                 .numShards(1)
                 .build();
-        BaseTest.milvusClientV2.createCollection(createCollectionReq);
+        milvusClientV2.createCollection(createCollectionReq);
         log.info("create collection:" + collectionName);
         return collectionName;
     }
@@ -531,7 +759,7 @@ public class CommonFunction {
                 .description("collection desc")
                 .numShards(1)
                 .build();
-        BaseTest.milvusClientV2.createCollection(createCollectionReq);
+        milvusClientV2.createCollection(createCollectionReq);
         log.info("create collection:" + collectionName);
         return collectionName;
     }
@@ -543,11 +771,11 @@ public class CommonFunction {
      * @param dim 维度
      * @return List<JsonObject>
      */
-    public static List<JsonObject> generateDefaultData(long startId,long num, int dim, DataType vectorType) {
+    public static List<JsonObject> generateDefaultData(long startId, long num, int dim, DataType vectorType) {
         List<JsonObject> jsonList = new ArrayList<>();
         Random ran = new Random();
         Gson gson = new Gson();
-        for (long i = startId; i < (num+startId); i++) {
+        for (long i = startId; i < (num + startId); i++) {
             JsonObject row = new JsonObject();
             row.addProperty(CommonData.fieldInt64, i);
             row.addProperty(CommonData.fieldInt32, (int) i % 32767);
@@ -593,6 +821,67 @@ public class CommonFunction {
         return jsonList;
     }
 
+    public static List<JsonObject> generateDefaultDataWithDynamic(long startId, long num, int dim, DataType vectorType) {
+        List<JsonObject> jsonList = new ArrayList<>();
+        Random ran = new Random();
+        Gson gson = new Gson();
+        for (long i = startId; i < (num + startId); i++) {
+            JsonObject row = new JsonObject();
+            row.addProperty(CommonData.fieldInt64, i);
+            row.addProperty(CommonData.fieldInt32, (int) i % 32767);
+            row.addProperty(CommonData.fieldInt16, (int) i % 32767);
+            row.addProperty(CommonData.fieldInt8, (short) i % 127);
+            row.addProperty(CommonData.fieldDouble, (double) i);
+            row.add(CommonData.fieldArray, gson.toJsonTree(Arrays.asList(i, i + 1, i + 2)));
+            row.addProperty(CommonData.fieldBool, i % 2 == 0);
+            row.addProperty(CommonData.fieldVarchar, "Str" + i);
+            row.addProperty(CommonData.fieldFloat, (float) i);
+            // 判断vectorType
+            if (vectorType == DataType.FloatVector) {
+                List<Float> vector = new ArrayList<>();
+                for (int k = 0; k < dim; ++k) {
+                    vector.add(ran.nextFloat());
+                }
+                row.add(CommonData.fieldFloatVector, gson.toJsonTree(vector));
+            }
+            if (vectorType == DataType.BinaryVector) {
+                row.add(CommonData.fieldBinaryVector, gson.toJsonTree(generateBinaryVector(dim).array()));
+            }
+            if (vectorType == DataType.Float16Vector) {
+                row.add(CommonData.fieldFloat16Vector, gson.toJsonTree(generateFloat16Vector(dim).array()));
+            }
+            if (vectorType == DataType.BFloat16Vector) {
+                row.add(CommonData.fieldBF16Vector, gson.toJsonTree(generateBF16Vector(dim).array()));
+            }
+            if (vectorType == DataType.SparseFloatVector) {
+                row.add(CommonData.fieldSparseVector, gson.toJsonTree(generateSparseVector(dim)));
+            }
+
+            JsonObject json = new JsonObject();
+            json.addProperty(CommonData.fieldInt64, (int) i % 32767);
+            json.addProperty(CommonData.fieldInt32, (int) i % 32767);
+            json.addProperty(CommonData.fieldDouble, (double) i);
+            json.add(CommonData.fieldArray, gson.toJsonTree(Arrays.asList(i, i + 1, i + 2)));
+            json.addProperty(CommonData.fieldBool, i % 2 == 0);
+            json.addProperty(CommonData.fieldVarchar, "Str" + i);
+            json.addProperty(CommonData.fieldFloat, (float) i);
+            row.add(CommonData.fieldJson, json);
+            // dynamic field
+            JsonObject jsonDynamic = new JsonObject();
+            json.addProperty(CommonData.fieldInt64, (int) i % 32767);
+            json.addProperty(CommonData.fieldInt32, (int) i % 32767);
+            json.addProperty(CommonData.fieldDouble, (double) i);
+            json.add(CommonData.fieldArray, gson.toJsonTree(Arrays.asList(i, i + 1, i + 2)));
+            json.addProperty(CommonData.fieldBool, i % 2 == 0);
+            json.addProperty(CommonData.fieldVarchar, "Str" + i);
+            json.addProperty(CommonData.fieldFloat, (float) i);
+            row.add(CommonData.fieldDynamic, json);
+
+            jsonList.add(row);
+        }
+        return jsonList;
+    }
+
     /**
      * 为快速生成的collection提供导入数据
      *
@@ -624,18 +913,18 @@ public class CommonFunction {
      * @param dim 维度
      * @return List<JsonObject>
      */
-    public static List<JsonObject> generateSimpleNullData(long startId,long num, int dim, DataType vectorType) {
+    public static List<JsonObject> generateSimpleNullData(long startId, long num, int dim, DataType vectorType) {
         List<JsonObject> jsonList = new ArrayList<>();
         Random ran = new Random();
         Gson gson = new Gson();
-        for (long i = startId; i < (num+startId); i++) {
+        for (long i = startId; i < (num + startId); i++) {
             JsonObject row = new JsonObject();
             row.addProperty(CommonData.fieldInt64, i);
-            row.addProperty(CommonData.fieldInt32, (String) null);
-            row.addProperty(CommonData.fieldInt16, (int) i % 32767);
-            row.addProperty(CommonData.fieldInt8, (short) i % 127);
-            row.addProperty(CommonData.fieldBool, i % 2 == 0);
-            if (i % 2 == 1) {
+            if (i % 2 == 0) {
+                row.addProperty(CommonData.fieldInt32, (int) i % 32767);
+                row.addProperty(CommonData.fieldInt16, (int) i % 32767);
+                row.addProperty(CommonData.fieldInt8, (short) i % 127);
+                row.addProperty(CommonData.fieldBool, i % 3 == 0);
                 row.addProperty(CommonData.fieldDouble, (double) i);
                 row.addProperty(CommonData.fieldVarchar, "Str" + i);
                 row.addProperty(CommonData.fieldFloat, (float) i);
@@ -663,15 +952,15 @@ public class CommonFunction {
             }
 
             JsonObject json = new JsonObject();
-            json.addProperty(CommonData.fieldInt64, (int) i % 32767);
-            json.addProperty(CommonData.fieldInt32, (int) i % 32767);
-            json.addProperty(CommonData.fieldDouble, (double) i);
-            json.add(CommonData.fieldArray, gson.toJsonTree(Arrays.asList(i, i + 1, i + 2)));
-            json.addProperty(CommonData.fieldBool, i % 2 == 0);
-            if ( i % 2 == 1) {
+            if (i % 2 == 0) {
+                json.addProperty(CommonData.fieldInt64, (int) i % 32767);
+                json.addProperty(CommonData.fieldInt32, (int) i % 32767);
+                json.addProperty(CommonData.fieldDouble, (double) i);
+                json.add(CommonData.fieldArray, gson.toJsonTree(Arrays.asList(i, i + 1, i + 2)));
+                json.addProperty(CommonData.fieldBool, i % 3 == 0);
                 json.addProperty(CommonData.fieldVarchar, "Str" + i);
+                json.addProperty(CommonData.fieldFloat, (float) i);
             }
-            json.addProperty(CommonData.fieldFloat, (float) i);
             row.add(CommonData.fieldJson, json);
             jsonList.add(row);
         }
@@ -686,13 +975,13 @@ public class CommonFunction {
      * @param collectionName collection name
      * @return collectionName
      */
-    public static String createSimpleCollection(int dim, String collectionName) {
+    public static String createSimpleCollection(int dim, String collectionName, boolean autoPK) {
         if (collectionName == null) {
             collectionName = "Collection_" + GenerateUtil.getRandomString(10);
         }
-        BaseTest.milvusClientV2.createCollection(CreateCollectionReq.builder()
+        milvusClientV2.createCollection(CreateCollectionReq.builder()
                 .collectionName(collectionName)
-                .autoID(false)
+                .autoID(autoPK)
                 .dimension(dim)
                 .enableDynamicField(false)
                 .build());
@@ -738,7 +1027,7 @@ public class CommonFunction {
                 .extraParams(provideExtraParam(indexType))
                 .metricType(metricType)
                 .build();
-        BaseTest.milvusClientV2.createIndex(CreateIndexReq.builder()
+        milvusClientV2.createIndex(CreateIndexReq.builder()
                 .collectionName(collectionName)
                 .indexParams(Collections.singletonList(indexParam))
                 .build());
@@ -756,7 +1045,7 @@ public class CommonFunction {
             IndexParam indexParam = IndexParam.builder().indexType(IndexParam.IndexType.TRIE).fieldName(x).build();
             indexParams.add(indexParam);
         });
-        BaseTest.milvusClientV2.createIndex(CreateIndexReq.builder()
+        milvusClientV2.createIndex(CreateIndexReq.builder()
                 .collectionName(collectionName)
                 .indexParams(indexParams)
                 .build());
@@ -764,7 +1053,7 @@ public class CommonFunction {
 
 
     public static void createPartition(String collectionName, String partitionName) {
-        BaseTest.milvusClientV2.createPartition(CreatePartitionReq.builder()
+        milvusClientV2.createPartition(CreatePartitionReq.builder()
                 .collectionName(collectionName)
                 .partitionName(partitionName)
                 .build());
@@ -776,7 +1065,7 @@ public class CommonFunction {
         vectors.forEach((v) -> {
             data.add(new FloatVec(v));
         });
-        return BaseTest.milvusClientV2.search(SearchReq.builder()
+        return milvusClientV2.search(SearchReq.builder()
                 .collectionName(collectionName)
                 .outputFields(Lists.newArrayList("*"))
                 .consistencyLevel(ConsistencyLevel.STRONG)
@@ -787,7 +1076,8 @@ public class CommonFunction {
     }
 
     /**
-     *  创建一条float32的向量
+     * 创建一条float32的向量
+     *
      * @param dimension 维度
      * @return List<Float>
      */
@@ -935,7 +1225,7 @@ public class CommonFunction {
                 .extraParams(CommonFunction.provideExtraParam(IndexParam.IndexType.AUTOINDEX))
                 .metricType(provideMetricTypeByVectorType(vectorType))
                 .build();
-        BaseTest.milvusClientV2.createIndex(CreateIndexReq.builder()
+        milvusClientV2.createIndex(CreateIndexReq.builder()
                 .collectionName(collection)
                 .indexParams(Collections.singletonList(indexParam))
                 .build());
@@ -999,23 +1289,23 @@ public class CommonFunction {
                 .extraParams(CommonFunction.provideExtraParam(providerIndexType(vectorType)))
                 .metricType(provideMetricTypeByVectorType(vectorType))
                 .build();
-        BaseTest.milvusClientV2.createIndex(CreateIndexReq.builder()
+        milvusClientV2.createIndex(CreateIndexReq.builder()
                 .collectionName(collectionName)
                 .indexParams(Collections.singletonList(indexParam))
                 .build());
         if (ifLoad) {
-            BaseTest.milvusClientV2.loadCollection(LoadCollectionReq.builder().collectionName(collectionName).build());
+            milvusClientV2.loadCollection(LoadCollectionReq.builder().collectionName(collectionName).build());
         }
-        insertIntoCollectionByBatch(collectionName,numberEntities,CommonData.dim,vectorType);
+        insertIntoCollectionByBatch(collectionName, numberEntities, CommonData.dim, vectorType);
 
     }
 
-    public static void insertIntoCollectionByBatch(String collectionName,long num,int dim,DataType vectorType){
-        long insertRounds = (num / CommonData.batchSize) ==0?1:(num / CommonData.batchSize);
+    public static void insertIntoCollectionByBatch(String collectionName, long num, int dim, DataType vectorType) {
+        long insertRounds = (num / CommonData.batchSize) == 0 ? 1 : (num / CommonData.batchSize);
         for (int i = 0; i < insertRounds; i++) {
-            System.out.println("insert batch:"+(i+1));
-            List<JsonObject> jsonObjects = generateDefaultData(i*CommonData.batchSize, CommonData.batchSize, dim, vectorType);
-            InsertResp insert = BaseTest.milvusClientV2.insert(InsertReq.builder().collectionName(collectionName).data(jsonObjects).build());
+            System.out.println("insert batch:" + (i + 1));
+            List<JsonObject> jsonObjects = generateDefaultData(i * CommonData.batchSize, CommonData.batchSize, dim, vectorType);
+            InsertResp insert = milvusClientV2.insert(InsertReq.builder().collectionName(collectionName).data(jsonObjects).build());
         }
     }
 
@@ -1120,7 +1410,7 @@ public class CommonFunction {
                 .description("collection desc")
                 .numShards(1)
                 .build();
-        BaseTest.milvusClientV2.createCollection(createCollectionReq);
+        milvusClientV2.createCollection(createCollectionReq);
         return collectionName;
     }
 
@@ -1164,7 +1454,7 @@ public class CommonFunction {
      * @return List<JsonObject>
      */
     public static List<JsonObject> genCommonData(String collectionName, long count) {
-        DescribeCollectionResp describeCollectionResp = BaseTest.milvusClientV2.describeCollection(DescribeCollectionReq.builder().collectionName(collectionName).build());
+        DescribeCollectionResp describeCollectionResp = milvusClientV2.describeCollection(DescribeCollectionReq.builder().collectionName(collectionName).build());
         CreateCollectionReq.CollectionSchema collectionSchema = describeCollectionResp.getCollectionSchema();
         List<CreateCollectionReq.FieldSchema> fieldSchemaList = collectionSchema.getFieldSchemaList();
         List<JsonObject> jsonList = new ArrayList<>();
@@ -1302,7 +1592,7 @@ public class CommonFunction {
             indexParamList.add(indexParam);
         }
 
-        BaseTest.milvusClientV2.createIndex(CreateIndexReq.builder()
+        milvusClientV2.createIndex(CreateIndexReq.builder()
                 .collectionName(collection)
                 .indexParams(indexParamList)
                 .build());
@@ -1328,20 +1618,21 @@ public class CommonFunction {
             indexParamList.add(indexParam);
         }
 
-        BaseTest.milvusClientV2.createIndex(CreateIndexReq.builder()
+        milvusClientV2.createIndex(CreateIndexReq.builder()
                 .collectionName(collection)
                 .indexParams(indexParamList)
                 .build());
     }
 
-    /** Drop Scalar Indexes
+    /**
+     * Drop Scalar Indexes
      *
-     * @param collection collection name
+     * @param collection     collection name
      * @param fieldParamList FieldParamList
      */
     public static void dropScalarCommonIndex(String collection, List<FieldParam> fieldParamList) {
         List<String> fieldNames = fieldParamList.stream().map(FieldParam::getFieldName).collect(Collectors.toList());
-        fieldNames.forEach(x -> BaseTest.milvusClientV2.dropIndex(DropIndexReq.builder()
+        fieldNames.forEach(x -> milvusClientV2.dropIndex(DropIndexReq.builder()
                 .collectionName(collection)
                 .fieldName(x)
                 .indexName(x)
@@ -1415,6 +1706,159 @@ public class CommonFunction {
         }
         return extraParam;
     }
+
+    /**
+     * 提供bulk import时候的files
+     *
+     * @param collection   collection
+     * @param bulkFileType 文件类型--枚举类bulkFileType
+     * @return
+     */
+    public static List<List<String>> providerBatchFiles(String collection, BulkFileType bulkFileType, long count) {
+        // 查询schema
+        DescribeCollectionResp describeCollectionResp = milvusClientV2.describeCollection(DescribeCollectionReq.builder().collectionName(collection).build());
+        CreateCollectionReq.CollectionSchema collectionSchema = describeCollectionResp.getCollectionSchema();
+        RemoteBulkWriter remoteBulkWriter = buildRemoteBulkWriter(collectionSchema, bulkFileType);
+        List<JsonObject> jsonObjects = CommonFunction.genCommonData(collection, count);
+        jsonObjects.forEach(x -> {
+            try {
+                remoteBulkWriter.appendRow(x);
+            } catch (IOException | InterruptedException e) {
+                log.error(e.getMessage());
+            }
+        });
+        System.out.printf("%s rows appends%n", remoteBulkWriter.getTotalRowCount());
+        System.out.printf("%s rows in buffer not flushed%n", remoteBulkWriter.getTotalRowCount());
+        try {
+            remoteBulkWriter.commit(false);
+        } catch (InterruptedException e) {
+            log.error(e.getMessage());
+        }
+        List<List<String>> batchFiles = remoteBulkWriter.getBatchFiles();
+        System.out.printf("Remote writer done! output remote files: %s%n", batchFiles);
+        return batchFiles;
+    }
+
+    /**
+     * 为开源提供 remote bulk writer
+     * RemoteBulkWriterParam = LocalBulkWriterParam + uploadObject + clearData
+     *
+     * @param collectionSchema
+     * @param bulkFileType
+     * @return
+     */
+    private static RemoteBulkWriter buildRemoteBulkWriter(CreateCollectionReq.CollectionSchema collectionSchema, BulkFileType bulkFileType) {
+        StorageConnectParam connectParam = S3ConnectParam.newBuilder()
+                .withEndpoint(System.getProperty("minio") == null ? PropertyFilesUtil.getRunValue("minio") : System.getProperty("minio"))
+                .withCloudName(CloudStorage.MINIO.getCloudName())
+                .withBucketName("milvus-bucket")
+                .withAccessKey("minioadmin")
+                .withSecretKey("minioadmin")
+                .withRegion("")
+                .build();
+        RemoteBulkWriterParam bulkWriterParam = RemoteBulkWriterParam.newBuilder()
+                .withCollectionSchema(collectionSchema)
+                .withRemotePath("bulk_data")
+                .withFileType(bulkFileType)
+                .withChunkSize(5 * 1024 * 1024 * 1024L)
+                .withConnectParam(connectParam)
+                .build();
+        RemoteBulkWriter remoteBulkWriter = null;
+        try {
+            remoteBulkWriter = new RemoteBulkWriter(bulkWriterParam);
+        } catch (IOException e) {
+            log.error(e.getMessage());
+        }
+        return remoteBulkWriter;
+    }
+
+
+    private static LocalBulkWriter buildLocalBulkWriter(CreateCollectionReq.CollectionSchema collectionSchema, BulkFileType bulkFileType) {
+        LocalBulkWriterParam bulkWriterParam = LocalBulkWriterParam.newBuilder()
+                .withCollectionSchema(collectionSchema)
+                .withLocalPath("/tmp/bulk_writer")
+                .withFileType(bulkFileType)
+                .withChunkSize(5 * 1024 * 1024 * 1024L)
+                .build();
+        LocalBulkWriter localBulkWriter;
+        try {
+            localBulkWriter = new LocalBulkWriter(bulkWriterParam);
+        } catch (IOException e) {
+            throw new RuntimeException(e);
+        }
+        return localBulkWriter;
+    }
+
+    public static List<List<String>> providerLocalBatchFiles(String collection, BulkFileType bulkFileType, long count) {
+        DescribeCollectionResp describeCollectionResp = milvusClientV2.describeCollection(DescribeCollectionReq.builder().collectionName(collection).build());
+        CreateCollectionReq.CollectionSchema collectionSchema = describeCollectionResp.getCollectionSchema();
+        LocalBulkWriter localBulkWriter = buildLocalBulkWriter(collectionSchema, bulkFileType);
+        List<JsonObject> jsonObjects = CommonFunction.genCommonData(collection, count);
+        for (JsonObject jsonObject : jsonObjects) {
+            try {
+                localBulkWriter.appendRow(jsonObject);
+            } catch (IOException | InterruptedException e) {
+                throw new RuntimeException(e);
+            }
+        }
+        System.out.printf("%s rows appends%n", localBulkWriter.getTotalRowCount());
+        System.out.printf("%s rows in buffer not flushed%n", localBulkWriter.getTotalRowCount());
+
+        try {
+            localBulkWriter.commit(false);
+        } catch (InterruptedException e) {
+            throw new RuntimeException(e);
+        }
+        List<List<String>> batchFiles = localBulkWriter.getBatchFiles();
+        System.out.printf("Local writer done! output remote files: %s%n", batchFiles);
+        return batchFiles;
+    }
+
+    // minio上传--copy from v1
+    public static void multiFilesUpload(String path, List<List<String>> batchFiles) {
+
+        MinioClient minioClient =
+                MinioClient.builder()
+                        .endpoint(System.getProperty("minio") == null ? PropertyFilesUtil.getRunValue("minio") : System.getProperty("minio"))
+                        .credentials("minioadmin", "minioadmin")
+                        .build();
+        // Make 'jsonBucket' bucket if not exist.
+        boolean found = false;
+        try {
+            found = minioClient.bucketExists(BucketExistsArgs.builder().bucket("milvus-bucket").build());
+            if (!found) {
+                // Make a new bucket called 'jsonBucket'.
+                minioClient.makeBucket(MakeBucketArgs.builder().bucket("milvus-bucket").build());
+            } else {
+                System.out.println("Bucket 'milvus-bucket' already exists.");
+            }
+
+            List<String> fileNameList=new ArrayList<>();
+            for (List<String> batchFileList : batchFiles) {
+                fileNameList.addAll(batchFileList);
+            }
+            for (String fileName : fileNameList) {
+                minioClient.uploadObject(
+                        UploadObjectArgs.builder()
+                                .bucket("milvus-bucket")
+                                .object( fileName)
+                                .filename( fileName)
+                                .build());
+                System.out.println(
+                        "'"
+                                + path
+                                + fileName
+                                + "' is successfully uploaded as "
+                                + "object '"
+                                + fileName
+                                + "' to bucket 'milvus-bucket'.");
+            }
+        } catch (Exception e) {
+            System.out.println(e.getMessage());
+        }
+
+    }
+
 }
 
 

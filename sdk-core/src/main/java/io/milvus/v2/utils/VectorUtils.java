@@ -48,6 +48,10 @@ public class VectorUtils {
                 .addAllPartitionNames(request.getPartitionNames())
                 .addAllOutputFields(request.getOutputFields())
                 .setExpr(request.getFilter());
+        if (StringUtils.isNotEmpty(request.getDatabaseName())) {
+            builder.setDbName(request.getDatabaseName());
+        }
+
         if (request.getFilter() != null && !request.getFilter().isEmpty()) {
             Map<String, Object> filterTemplateValues = request.getFilterTemplateValues();
             filterTemplateValues.forEach((key, value)->{
@@ -138,6 +142,10 @@ public class VectorUtils {
                 .setCollectionName(request.getCollectionName());
         if (!request.getPartitionNames().isEmpty()) {
             request.getPartitionNames().forEach(builder::addPartitionNames);
+        }
+
+        if (StringUtils.isNotEmpty(request.getDatabaseName())) {
+            builder.setDbName(request.getDatabaseName());
         }
 
         // prepare target, the input could be vectors or string list for doc-in-doc-out
@@ -242,8 +250,17 @@ public class VectorUtils {
             });
         }
 
-        long guaranteeTimestamp = getGuaranteeTimestamp(request.getConsistencyLevel(), request.getCollectionName());
-        builder.setGuaranteeTimestamp(guaranteeTimestamp);
+        // the SearchIteratorV2 passes a guaranteeTimestamp value, no need to call getGuaranteeTimestamp()
+        if (request.getSearchParams().containsKey("iterator")) {
+            long guaranteeTimestamp = 0;
+            if (request.getSearchParams().containsKey("guarantee_timestamp")) {
+                guaranteeTimestamp = (long)request.getSearchParams().get("guarantee_timestamp");
+            }
+            builder.setGuaranteeTimestamp(guaranteeTimestamp);
+        } else {
+            long guaranteeTimestamp = getGuaranteeTimestamp(request.getConsistencyLevel(), request.getCollectionName());
+            builder.setGuaranteeTimestamp(guaranteeTimestamp);
+        }
 
         // a new parameter from v2.2.9, if user didn't specify consistency level, set this parameter to true
         if (request.getConsistencyLevel() == null) {
@@ -450,8 +467,9 @@ public class VectorUtils {
         }
 
         Map<String, String> props = ranker.getProperties();
-        props.put("limit", String.format("%d", request.getTopK()));
-        props.put("round_decimal", String.format("%d", request.getRoundDecimal()));
+        props.put(Constant.LIMIT, String.format("%d", request.getTopK()));
+        props.put(Constant.ROUND_DECIMAL, String.format("%d", request.getRoundDecimal()));
+        props.put(Constant.OFFSET, String.format("%d", request.getOffset()));
         List<KeyValuePair> propertiesList = ParamUtils.AssembleKvPair(props);
         if (CollectionUtils.isNotEmpty(propertiesList)) {
             propertiesList.forEach(builder::addRankParams);

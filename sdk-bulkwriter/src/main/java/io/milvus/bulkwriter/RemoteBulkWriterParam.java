@@ -40,10 +40,10 @@ import java.util.Map;
 @Getter
 @ToString
 public class RemoteBulkWriterParam {
-    private final CollectionSchemaParam collectionSchema;
+    private final CreateCollectionReq.CollectionSchema collectionSchema;
     private final StorageConnectParam connectParam;
     private final String remotePath;
-    private final int chunkSize;
+    private final long chunkSize;
     private final BulkFileType fileType;
     private final Map<String, Object> config;
 
@@ -64,10 +64,10 @@ public class RemoteBulkWriterParam {
      * Builder for {@link RemoteBulkWriterParam} class.
      */
     public static final class Builder {
-        private CollectionSchemaParam collectionSchema;
+        private CreateCollectionReq.CollectionSchema collectionSchema;
         private StorageConnectParam connectParam;
         private String remotePath;
-        private int chunkSize = 1024 * 1024 * 1024;
+        private long chunkSize = 128 * 1024 * 1024;
         private BulkFileType fileType = BulkFileType.PARQUET;
         private Map<String, Object> config = new HashMap<>();
 
@@ -81,7 +81,7 @@ public class RemoteBulkWriterParam {
          * @return <code>Builder</code>
          */
         public Builder withCollectionSchema(@NonNull CollectionSchemaParam collectionSchema) {
-            this.collectionSchema = collectionSchema;
+            this.collectionSchema = V2AdapterUtils.convertV1Schema(collectionSchema);
             return this;
         }
 
@@ -92,7 +92,7 @@ public class RemoteBulkWriterParam {
          * @return <code>Builder</code>
          */
         public Builder withCollectionSchema(@NonNull CreateCollectionReq.CollectionSchema collectionSchema) {
-            this.collectionSchema = V2AdapterUtils.convertV2Schema(collectionSchema);
+            this.collectionSchema = collectionSchema;
             return this;
         }
 
@@ -112,7 +112,7 @@ public class RemoteBulkWriterParam {
             return this;
         }
 
-        public Builder withChunkSize(int chunkSize) {
+        public Builder withChunkSize(long chunkSize) {
             this.chunkSize = chunkSize;
             return this;
         }
